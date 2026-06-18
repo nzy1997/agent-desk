@@ -31,7 +31,6 @@ class Scheduler:
         self._paused = False
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._next_repo_index = 0
 
     @property
     def paused(self) -> bool:
@@ -50,21 +49,22 @@ class Scheduler:
         while not self._stop.is_set():
             if not self._paused:
                 try:
-                    self.run_available()
+                    self.discover_ready()
                 except Exception:
                     pass
             self._stop.wait(self.config.poll_interval_seconds)
 
     def run_available(self) -> list[RunNextResult]:
+        return self.discover_ready()
+
+    def discover_ready(self) -> list[RunNextResult]:
         results: list[RunNextResult] = []
         with self._lock:
             if self._paused:
                 return []
-            while self._active_count() < self.config.max_concurrent_runs:
-                result = self._run_next_unlocked()
-                if not result.started:
-                    break
-                results.append(result)
+            for repo in self.config.repos:
+                for issue in self._ready_issues(repo):
+                    results.append(self._queue_issue(repo, issue))
         return results
 
     def run_next(self) -> RunNextResult:
@@ -73,32 +73,36 @@ class Scheduler:
                 return RunNextResult(False, "Scheduler is paused")
             if self._active_count() >= self.config.max_concurrent_runs:
                 return RunNextResult(False, "Max concurrent runs reached")
-            return self._run_next_unlocked()
+            ready = self.store.list_runs({"ready"})
+            if not ready:
+                for repo in self.config.repos:
+                    for issue in self._ready_issues(repo):
+                        self._queue_issue(repo, issue)
+                ready = self.store.list_runs({"ready"})
+            if not ready:
+                return RunNextResult(False, "No agent:ready issues found")
+            return self._start_ready_run(int(ready[-1]["id"]))
 
-    def _run_next_unlocked(self) -> RunNextResult:
-        repos = self.config.repos
-        if not repos:
-            return RunNextResult(False, "No repositories configured")
-        for offset in range(len(repos)):
-            repo_index = (self._next_repo_index + offset) % len(repos)
-            repo = repos[repo_index]
-            issue = self._next_issue(repo)
-            if issue:
-                self._next_repo_index = (repo_index + 1) % len(repos)
-                return self._start_issue(repo, issue)
-        return RunNextResult(False, "No agent:ready issues found")
+    def start_run(self, run_id: int) -> RunNextResult:
+        with self._lock:
+            if self._paused:
+                return RunNextResult(False, "Scheduler is paused", run_id)
+            if self._active_count() >= self.config.max_concurrent_runs:
+                return RunNextResult(False, "Max concurrent runs reached", run_id)
+            return self._start_ready_run(run_id)
 
     def _active_count(self) -> int:
         return len(self.store.list_runs({"running"}))
 
-    def _next_issue(self, repo: RepoConfig) -> dict | None:
+    def _ready_issues(self, repo: RepoConfig) -> list[dict]:
         issues = self.github.list_ready_issues(repo.name, repo.ready_label, limit=10)
-        for issue in issues:
-            if not self.store.find_open_run(repo.name, int(issue["number"])):
-                return issue
-        return None
+        return [
+            issue
+            for issue in issues
+            if not self.store.find_open_run(repo.name, int(issue["number"]))
+        ]
 
-    def _start_issue(self, repo: RepoConfig, issue: dict) -> RunNextResult:
+    def _queue_issue(self, repo: RepoConfig, issue: dict) -> RunNextResult:
         issue_number = int(issue["number"])
         title = str(issue.get("title") or f"Issue {issue_number}")
         attempt = self.store.next_attempt(repo.name, issue_number)
@@ -107,9 +111,24 @@ class Scheduler:
             repo_name=repo.name,
             issue_number=issue_number,
             issue_title=title,
+            issue_body=str(issue.get("body") or ""),
             issue_url=str(issue.get("url") or ""),
             branch_name=branch,
         )
+        self.store.update_run(run_id, state="ready", stage="waiting for human run")
+        self.store.add_event(run_id, "info", "ready", "Issue is ready to run", {"repo": repo.name})
+        return RunNextResult(False, f"Queued issue #{issue_number}", run_id)
+
+    def _start_ready_run(self, run_id: int) -> RunNextResult:
+        run = self.store.get_run(run_id)
+        if run["state"] != "ready":
+            return RunNextResult(False, f"Run #{run_id} is not ready", run_id)
+        repo = self._repo_for_run(run)
+        issue_number = int(run["issue_number"])
+        title = str(run["issue_title"])
+        branch = str(run["branch_name"])
+        issue_url = str(run["issue_url"])
+        issue_body = str(run.get("issue_body") or "")
         self.store.add_event(run_id, "info", "claim", "Claimed issue", {"repo": repo.name})
         self.store.update_run(run_id, state="running", stage="claimed")
         if repo.mutate_github:
@@ -122,14 +141,20 @@ class Scheduler:
                 "repo": repo,
                 "issue_number": issue_number,
                 "issue_title": title,
-                "issue_body": str(issue.get("body") or ""),
-                "issue_url": str(issue.get("url") or ""),
+                "issue_body": issue_body,
+                "issue_url": issue_url,
                 "branch_name": branch,
             },
             daemon=True,
         )
         thread.start()
         return RunNextResult(True, f"Started issue #{issue_number}", run_id)
+
+    def _repo_for_run(self, run: dict) -> RepoConfig:
+        for repo in self.config.repos:
+            if repo.name == run["repo_name"]:
+                return repo
+        raise KeyError(f"repository {run['repo_name']} is not configured")
 
     def _run_worker_for_issue(
         self,

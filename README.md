@@ -12,12 +12,13 @@ This MVP uses only the Python standard library plus local command-line tools:
 ## MVP Scope
 
 - Scan configured repositories for `agent:ready` issues.
-- Start up to `max_concurrent_runs` workers at once.
-- Support multiple configured repositories with round-robin scheduling.
+- Queue configured repositories' `agent:ready` issues without starting workers automatically.
+- Start workers only after a human clicks `Run`.
+- Support multiple configured repositories in one manual queue.
 - Create a Git worktree and branch for each run.
 - Run `codex exec` non-interactively with the fixed Superpowers-to-PR protocol.
 - Save `prompt.md`, `stdout.jsonl`, `stderr.log`, `result.json`, `codex-resume.txt`, and command logs per run.
-- Serve a local dashboard at `http://127.0.0.1:8765` with per-run log links and Codex resume commands.
+- Serve a local dashboard at `http://127.0.0.1:8765` with per-run log links, Codex resume commands, PR feedback, and closeout controls.
 - Keep GitHub mutation and PR creation disabled until configured.
 
 ## Quick Start
@@ -40,6 +41,10 @@ Run one issue manually:
 python3 -m agent_desk run-next --config config/repos.toml
 ```
 
+The scheduler polls GitHub and queues ready issues as local `ready` runs. It
+does not start Codex workers by itself. Use the dashboard `Run` button, or
+`run-next`, to start one queued issue.
+
 ## Multiple Repositories And Concurrency
 
 Add one `[[repos]]` block per repository:
@@ -61,7 +66,7 @@ base_branch = "main"
 test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
 ```
 
-The concurrency limit is global. If it is set to `3`, Agent Desk can run three Codex CLI workers at the same time across all repositories. Scheduling is round-robin across repositories so one busy repository does not monopolize every slot.
+The concurrency limit is global. If it is set to `3`, Agent Desk can run three Codex CLI workers at the same time across all repositories. Discovery can queue issues from every configured repository, but workers only start when a human clicks `Run` or invokes `run-next`.
 
 Start low. Each active issue means one `codex exec` process plus whatever tests that worker runs.
 
@@ -117,6 +122,23 @@ SQLite are backfilled from `stdout.jsonl` for display.
 Do not remove a run worktree while it may still need human intervention. Cleanup
 should happen after the related PR has been merged or closed and the issue has
 been resolved.
+
+## PR Review And Closeout
+
+For a run in `pr_open`, the dashboard exposes two Codex-resume actions:
+
+- `Request changes`: sends your review feedback to the original Codex thread
+  with `codex exec resume THREAD_ID`, asking it to update and push the existing
+  PR branch.
+- `Approve & finish`: sends a generic closeout prompt to the original Codex
+  thread. Codex checks PR status, refuses to merge if checks are pending or
+  failing, merges when safe, syncs local state, cleans up the worktree, closes
+  or updates the completed issue, and marks newly unblocked issues with
+  `agent:ready`.
+
+Agent Desk records the continuation logs on the same run. It does not decide
+which follow-up issues are ready; that judgment stays with the resumed Codex
+thread.
 
 ## Tests
 

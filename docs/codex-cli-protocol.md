@@ -15,6 +15,10 @@ For automation-to-automation continuation, use `codex exec resume THREAD_ID
 "prompt"`. For human intervention, prefer the interactive `codex resume`
 command shown in the dashboard.
 
+Agent Desk uses `codex exec resume` for PR review follow-up and closeout. The
+manager supplies a generic prompt and records logs; the resumed Codex thread
+decides the repository-specific steps.
+
 ## Standing Answer Policy
 
 Every worker prompt includes these rules:
@@ -74,3 +78,27 @@ command logs attached to the run directory.
 The worktree is part of the resume context. Agent Desk should not remove it
 while a run is blocked, failed, awaiting review, or attached to an open PR.
 Cleanup belongs after the PR is merged or closed and the issue is resolved.
+
+## Manual Run Gate
+
+Issue discovery is separate from execution. The scheduler may scan GitHub and
+create local runs in state `ready`, but it must not start Codex workers until a
+human clicks `Run` or invokes `run-next`.
+
+## Resume Closeout Prompt
+
+When a human approves a PR, Agent Desk resumes the original Codex thread with a
+generic closeout prompt. The prompt instructs Codex to:
+
+1. Inspect the PR status and checks.
+2. Return `blocked` without merging if checks are pending or failing.
+3. Merge only after checks are successful.
+4. Sync the local base branch.
+5. Remove the local worktree and stale worktree metadata when safe.
+6. Close or update the completed issue.
+7. Inspect related open issues and add `agent:ready` to issues that are now
+   unblocked, without starting them.
+
+When a human requests changes, Agent Desk resumes the same thread with the
+feedback and asks Codex to update and push the existing PR branch without
+merging.

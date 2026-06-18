@@ -36,7 +36,7 @@ class NoopScheduler(Scheduler):
 
 
 class SchedulerTests(unittest.TestCase):
-    def test_run_available_fills_concurrency_across_repositories_without_overfill(self):
+    def test_run_available_discovers_ready_runs_without_starting_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / "desk.sqlite")
@@ -52,12 +52,32 @@ class SchedulerTests(unittest.TestCase):
 
             results = scheduler.run_available()
 
-            self.assertEqual(len(results), 3)
-            self.assertTrue(all(result.started for result in results))
-            self.assertEqual(store.dashboard_state()["stats"]["running"], 3)
+            self.assertEqual(len(results), 4)
+            self.assertTrue(all(not result.started for result in results))
+            self.assertEqual(store.dashboard_state()["stats"]["ready"], 4)
             issues_by_run_order = [run["issue_number"] for run in reversed(store.list_runs())]
-            self.assertEqual(issues_by_run_order, [1, 3, 2])
+            self.assertEqual(issues_by_run_order, [1, 2, 3, 4])
             self.assertEqual(scheduler.run_available(), [])
+
+    def test_start_run_claims_ready_issue_after_human_click(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                max_concurrent_runs=1,
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=FakeGitHub())
+            run_id = scheduler.run_available()[0].run_id
+
+            result = scheduler.start_run(run_id)
+            run = store.get_run(run_id)
+
+            self.assertTrue(result.started)
+            self.assertEqual(run["state"], "running")
+            self.assertEqual(run["stage"], "claimed")
+            self.assertEqual(run["issue_body"], "one")
 
     def test_retry_uses_unique_branch_name_after_failed_run(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -40,6 +40,7 @@ class Store:
                     repo_name text not null,
                     issue_number integer not null,
                     issue_title text not null,
+                    issue_body text not null default '',
                     issue_url text not null,
                     branch_name text not null,
                     state text not null default 'queued',
@@ -76,6 +77,7 @@ class Store:
                 """
             )
             self._ensure_column(conn, "runs", "run_dir", "text not null default ''")
+            self._ensure_column(conn, "runs", "issue_body", "text not null default ''")
             self._ensure_column(conn, "runs", "codex_thread_id", "text not null default ''")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -91,6 +93,7 @@ class Store:
         issue_title: str,
         issue_url: str,
         branch_name: str,
+        issue_body: str = "",
     ) -> int:
         now = utc_now()
         attempt = self.next_attempt(repo_name, issue_number)
@@ -98,12 +101,12 @@ class Store:
             cur = conn.execute(
                 """
                 insert into runs (
-                    repo_name, issue_number, issue_title, issue_url, branch_name,
+                    repo_name, issue_number, issue_title, issue_body, issue_url, branch_name,
                     attempt, created_at, updated_at
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (repo_name, issue_number, issue_title, issue_url, branch_name, attempt, now, now),
+                (repo_name, issue_number, issue_title, issue_body, issue_url, branch_name, attempt, now, now),
             )
             run_id = int(cur.lastrowid)
         self.add_event(run_id, "info", "queued", f"Queued issue #{issue_number}", {})

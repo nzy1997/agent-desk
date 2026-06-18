@@ -4,9 +4,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .continuation import ContinuationRunner
 from .scheduler import Scheduler
 from .store import Store
 from .worker import extract_thread_id, format_resume_command
@@ -32,6 +34,14 @@ LOG_FILE_ORDER = [
     "stdout.jsonl",
     "codex-resume.txt",
     "result.json",
+    "request-changes-prompt.md",
+    "request-changes.stdout.jsonl",
+    "request-changes.stderr.log",
+    "request-changes-result.json",
+    "approve-finish-prompt.md",
+    "approve-finish.stdout.jsonl",
+    "approve-finish.stderr.log",
+    "approve-finish-result.json",
     "git-fetch.stderr.log",
     "git-fetch.stdout.log",
     "git-worktree.stderr.log",
@@ -82,6 +92,24 @@ def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseH
             if path == "/api/actions/run-next":
                 self._send_json(scheduler.run_next().__dict__)
                 return
+            if path.startswith("/api/run/") and path.endswith("/start"):
+                run_id = int(path.split("/")[3])
+                self._send_json(scheduler.start_run(run_id).__dict__)
+                return
+            if path.startswith("/api/run/") and path.endswith("/request-changes"):
+                run_id = int(path.split("/")[3])
+                feedback = str(self._read_json().get("feedback") or "")
+                if not feedback.strip():
+                    self.send_error(HTTPStatus.BAD_REQUEST, "feedback is required")
+                    return
+                self._start_continuation("request_changes", run_id, feedback)
+                self._send_json({"ok": True, "message": "Request changes started", "run_id": run_id})
+                return
+            if path.startswith("/api/run/") and path.endswith("/approve-finish"):
+                run_id = int(path.split("/")[3])
+                self._start_continuation("approve_finish", run_id)
+                self._send_json({"ok": True, "message": "Approve and finish started", "run_id": run_id})
+                return
             if path == "/api/actions/pause":
                 scheduler.pause()
                 self._send_json({"ok": True, "paused": True})
@@ -94,6 +122,19 @@ def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseH
 
         def log_message(self, format: str, *args: Any) -> None:
             return
+
+        def _read_json(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length <= 0:
+                return {}
+            body = self.rfile.read(length).decode("utf-8")
+            value = json.loads(body)
+            return value if isinstance(value, dict) else {}
+
+        def _start_continuation(self, method_name: str, run_id: int, *args: Any) -> None:
+            runner = ContinuationRunner(scheduler.config, store)
+            method = getattr(runner, method_name)
+            threading.Thread(target=method, args=(run_id, *args), daemon=True).start()
 
         def _send_json(self, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, indent=2).encode("utf-8")
@@ -220,6 +261,7 @@ HTML = """<!doctype html>
     .metric-row { display: flex; justify-content: space-between; }
     .muted { color: var(--muted); }
     .state-running { color: var(--accent); }
+    .state-ready { color: var(--warn); }
     .state-blocked, .state-failed { color: var(--bad); }
     .state-done, .state-pr_open, .state-needs_review { color: var(--good); }
     .event.error { border-color: #f4b7b0; }
@@ -258,6 +300,22 @@ HTML = """<!doctype html>
     .resume-command button {
       padding: 5px 8px;
       font-size: 12px;
+    }
+    .run-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .feedback-box {
+      width: 100%;
+      min-height: 64px;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px;
+      font: inherit;
+      resize: vertical;
     }
     pre {
       white-space: pre-wrap;
@@ -308,6 +366,14 @@ HTML = """<!doctype html>
       await fetch(path, { method: 'POST' });
       await refresh();
     }
+    async function postJson(path, body) {
+      await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {})
+      });
+      await refresh();
+    }
     function esc(value) {
       return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
@@ -331,6 +397,24 @@ HTML = """<!doctype html>
       if (!command) return '';
       return `<div class="resume-command"><code>${esc(command)}</code><button onclick="copyResume(${jsString(command)})">Copy</button></div>`;
     }
+    function requestChanges(runId) {
+      const box = document.getElementById(`feedback-${runId}`);
+      const feedback = box ? box.value : '';
+      return postJson(`/api/run/${runId}/request-changes`, { feedback });
+    }
+    function runActions(run) {
+      if (run.state === 'ready') {
+        return `<div class="run-actions"><button class="primary" onclick="action('/api/run/${run.id}/start')">Run</button></div>`;
+      }
+      if (run.state === 'pr_open') {
+        return `<textarea id="feedback-${run.id}" class="feedback-box" placeholder="Review feedback"></textarea>
+          <div class="run-actions">
+            <button onclick="requestChanges(${run.id})">Request changes</button>
+            <button class="primary" onclick="action('/api/run/${run.id}/approve-finish')">Approve & finish</button>
+          </div>`;
+      }
+      return '';
+    }
     function runHtml(run) {
       return `<div class="run">
         <strong>#${run.issue_number} ${esc(run.issue_title)}</strong>
@@ -339,6 +423,7 @@ HTML = """<!doctype html>
         <div>Stage: ${esc(run.stage)}</div>
         ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
         ${resumeCommand(run)}
+        ${runActions(run)}
         ${logLinks(run)}
       </div>`;
     }

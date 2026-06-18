@@ -117,6 +117,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("resumeCommand(run)", HTML)
         self.assertIn("navigator.clipboard.writeText(command)", HTML)
 
+    def test_dashboard_html_renders_manual_run_and_pr_action_buttons(self):
+        self.assertIn("/api/run/${run.id}/start", HTML)
+        self.assertIn("/api/run/${runId}/request-changes", HTML)
+        self.assertIn("/api/run/${run.id}/approve-finish", HTML)
+        self.assertIn("Approve & finish", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()
