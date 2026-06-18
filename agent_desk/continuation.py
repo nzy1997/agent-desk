@@ -30,7 +30,7 @@ class ContinuationRunner:
     def approve_finish(self, run_id: int) -> ContinuationResult:
         run = self.store.get_run(run_id)
         repo = self._repo_for_run(run)
-        prompt = render_approve_finish_prompt(run, ready_label=repo.ready_label)
+        prompt = render_approve_finish_prompt(run, ready_label=repo.ready_label, blocked_label=repo.blocked_label)
         return self._resume(
             run_id,
             "approve-finish",
@@ -214,7 +214,7 @@ Return JSON with status, summary, tests, questions, risks, pr_url, and decision_
 """
 
 
-def render_approve_finish_prompt(run: dict[str, Any], *, ready_label: str) -> str:
+def render_approve_finish_prompt(run: dict[str, Any], *, ready_label: str, blocked_label: str) -> str:
     return f"""Human approval has been granted for this Agent Desk pull request.
 
 Repository: {run['repo_name']}
@@ -230,7 +230,7 @@ Continue from the existing Codex thread context and perform the closeout workflo
 4. Sync the local base branch with origin.
 5. Remove the local worktree and prune stale worktree metadata when it is safe.
 6. Close or update the completed issue if GitHub did not do it automatically.
-7. Inspect related open issues and determine which open issues are now unblocked and ready for an agent. Add the configured ready label {ready_label} to issues that can now be run. Do not start those issues.
+7. Inspect only open issues with the configured blocked label {blocked_label}; these are the standby agent issues. Determine which of those blocked issues are now unblocked and ready for an agent. For each issue that can now be run, add the configured ready label {ready_label} and remove {blocked_label}. Do not add {ready_label} to unlabeled issues, issues without {blocked_label}, or discussions/features that are not explicitly labeled for agent work. Do not start those issues.
 8. Report exactly which PR, worktree, branch, issue, and follow-up issue labels were changed.
 
 Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.

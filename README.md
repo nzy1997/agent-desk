@@ -139,12 +139,13 @@ For a run in `pr_open`, the dashboard exposes two Codex-resume actions:
 - `Approve & finish`: sends a generic closeout prompt to the original Codex
   thread. Codex checks PR status, refuses to merge if checks are pending or
   failing, merges when safe, syncs local state, cleans up the worktree, closes
-  or updates the completed issue, and marks newly unblocked issues with
-  `agent:ready`.
+  or updates the completed issue, and promotes newly unblocked `agent:blocked`
+  issues to `agent:ready`.
 
 Agent Desk records the continuation logs on the same run. It does not decide
 which follow-up issues are ready; that judgment stays with the resumed Codex
-thread.
+thread. Unlabeled issues and issues without `agent:blocked` are ignored during
+closeout so ordinary discussion threads or non-agent work are not picked up.
 
 ## Tests
 

@@ -102,8 +102,10 @@ generic closeout prompt. The prompt instructs Codex to:
 4. Sync the local base branch.
 5. Remove the local worktree and stale worktree metadata when safe.
 6. Close or update the completed issue.
-7. Inspect related open issues and add `agent:ready` to issues that are now
-   unblocked, without starting them.
+7. Inspect only open issues labeled `agent:blocked`. For blocked issues that
+   are now unblocked and ready for an agent, add `agent:ready` and remove
+   `agent:blocked`, without starting them. Ignore unlabeled issues and issues
+   without `agent:blocked`.
 
 When a human requests changes, Agent Desk resumes the same thread with the
 feedback and asks Codex to update and push the existing PR branch without
