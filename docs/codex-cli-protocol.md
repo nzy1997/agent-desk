@@ -24,6 +24,13 @@ Every worker prompt includes these rules:
 8. If `push_pr = false`, choose `Keep the branch as-is` at the finishing prompt.
 9. Stop after PR creation or local branch completion. Do not merge.
 
+When `push_pr = true`, PR creation has a manager fallback. If implementation and
+verification are complete but Codex CLI cannot create the pull request because
+GitHub tools, network access, or credentials are unavailable inside the worker
+environment, Codex should return `status: "done"` with an empty `pr_url` and
+record the PR creation failure in `risks` or `questions`. Agent Desk will then
+run `git push` and `gh pr create` from the manager process.
+
 ## Result Contract
 
 Codex must return JSON matching `schemas/worker-result.schema.json`:
@@ -44,3 +51,7 @@ Codex must return JSON matching `schemas/worker-result.schema.json`:
 ```
 
 When `pr_url` is present, Agent Desk marks the run as `pr_open` and records the URL for dashboard monitoring.
+When `pr_url` is empty and `status` is `done` with `push_pr = true`, Agent Desk
+attempts to open the PR itself. The run is marked `pr_open` only if the manager
+gets a PR URL back; failed push or PR creation leaves the run `blocked` with the
+command logs attached to the run directory.

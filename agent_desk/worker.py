@@ -245,11 +245,15 @@ class Worker:
         run_dir: Path,
     ) -> None:
         self.store.update_run(run_id, stage="opening pull request")
-        self.runner.run(
+        push = self.runner.run(
             ["git", "-C", str(worktree_path), "push", "-u", "origin", branch_name],
             stdout_path=run_dir / "git-push.stdout.log",
             stderr_path=run_dir / "git-push.stderr.log",
         )
+        if push.returncode != 0:
+            self._block_pr_open(run_id, "git push failed", push.stderr)
+            return
+
         body_path = run_dir / "pr-body.md"
         body_path.write_text(
             f"Fixes #{issue_number}\n\nCreated by Agent Desk from issue #{issue_number}.\n",
@@ -276,8 +280,17 @@ class Worker:
             stderr_path=run_dir / "gh-pr-create.stderr.log",
         )
         pr_url = pr.stdout.strip().splitlines()[-1] if pr.stdout.strip() else ""
+        if pr.returncode != 0 or not pr_url:
+            detail = pr.stderr or pr.stdout or "gh pr create did not return a pull request URL"
+            self._block_pr_open(run_id, "gh pr create failed", detail)
+            return
+
         self.store.update_run(run_id, state="pr_open", stage="pull request opened", pr_url=pr_url)
         self.store.add_event(run_id, "info", "pr", "Opened draft pull request", {"url": pr_url})
+
+    def _block_pr_open(self, run_id: int, summary: str, detail: str) -> None:
+        self.store.update_run(run_id, state="blocked", stage="blocked", last_error=summary)
+        self.store.add_event(run_id, "error", "pr", summary, {"detail": detail[-4000:]})
 
     def _fail(self, run_id: int, run_dir: Path, state: str, summary: str, detail: str) -> WorkerResult:
         (run_dir / "error.log").write_text(detail, encoding="utf-8")

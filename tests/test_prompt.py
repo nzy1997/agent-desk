@@ -55,6 +55,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Push and create a Pull Request", prompt)
         self.assertIn("decision_log", prompt)
         self.assertIn("Stop after the pull request is created", prompt)
+        self.assertIn("only failed step is creating the pull request", prompt)
+        self.assertIn('return status "done" with pr_url set to an empty string', prompt)
 
     def test_prompt_keeps_branch_local_when_push_pr_is_disabled(self):
         repo = RepoConfig(

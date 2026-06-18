@@ -81,6 +81,12 @@ With those defaults, Agent Desk reads GitHub issues and runs local workers, but 
 - `push_pr = true`: choose `Push and create a Pull Request`.
 - `push_pr = false`: choose `Keep the branch as-is`.
 
+When `push_pr = true`, Agent Desk also owns a fallback PR path. If the Codex
+worker finishes the implementation but cannot create the PR from inside its own
+environment, it should return `done` with an empty `pr_url`; the manager then
+runs `git push` and `gh pr create` locally. Runs are marked `pr_open` only after
+the manager receives a PR URL.
+
 See `docs/codex-cli-protocol.md` for the full fixed Codex CLI interaction policy.
 
 ## Inspecting Failures

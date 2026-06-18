@@ -16,7 +16,10 @@ def render_worker_prompt(
     if repo.push_pr:
         finish_instruction = (
             'When finishing asks what to do with the branch, choose "Push and create a Pull Request".\n'
-            "8. Stop after the pull request is created. Do not merge."
+            "8. Stop after the pull request is created. Do not merge.\n"
+            '9. If implementation and verification are complete but the only failed step is creating the pull request, '
+            'return status "done" with pr_url set to an empty string. Agent Desk will retry PR creation from the '
+            "manager process. Record the PR creation failure in risks or questions."
         )
     else:
         finish_instruction = (
