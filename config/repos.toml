@@ -17,7 +17,7 @@ blocked_label = "agent:blocked"
 needs_review_label = "agent:needs-human-review"
 test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
-# Keep label mutation disabled until the loop is comfortable.
+# Label mutation is enabled so Agent Desk can move issues through agent:* states.
 # PR creation is enabled for the Superpowers-to-PR flow.
-mutate_github = false
+mutate_github = true
 push_pr = true
