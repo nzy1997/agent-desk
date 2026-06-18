@@ -15,7 +15,7 @@ This MVP uses only the Python standard library plus local command-line tools:
 - Start up to `max_concurrent_runs` workers at once.
 - Support multiple configured repositories with round-robin scheduling.
 - Create a Git worktree and branch for each run.
-- Run `codex exec` non-interactively with a structured result contract.
+- Run `codex exec` non-interactively with the fixed Superpowers-to-PR protocol.
 - Save `prompt.md`, `stdout.jsonl`, `stderr.log`, `result.json`, and command logs per run.
 - Serve a local dashboard at `http://127.0.0.1:8765`.
 - Keep GitHub mutation and PR creation disabled until configured.
@@ -75,6 +75,13 @@ push_pr = false
 ```
 
 With those defaults, Agent Desk reads GitHub issues and runs local workers, but it does not change labels or open PRs. Flip them only after the local loop behaves the way you want.
+
+`push_pr` controls the worker finishing choice:
+
+- `push_pr = true`: choose `Push and create a Pull Request`.
+- `push_pr = false`: choose `Keep the branch as-is`.
+
+See `docs/codex-cli-protocol.md` for the full fixed Codex CLI interaction policy.
 
 ## Tests
 

@@ -35,6 +35,8 @@ class WorkerResult:
     tests: list[str]
     questions: list[str]
     risks: list[str]
+    pr_url: str
+    decision_log: list[str]
     run_dir: Path
 
 
@@ -194,13 +196,23 @@ class Worker:
             tests=[str(item) for item in payload.get("tests", [])],
             questions=[str(item) for item in payload.get("questions", [])],
             risks=[str(item) for item in payload.get("risks", [])],
+            pr_url=str(payload.get("pr_url", "")),
+            decision_log=[str(item) for item in payload.get("decision_log", [])],
             run_dir=run_dir,
         )
-        final_state = status if status in {"done", "blocked", "failed"} else "failed"
-        self.store.update_run(run_id, state=final_state, stage=final_state)
+        if result.pr_url:
+            final_state = "pr_open"
+        elif status in {"done", "blocked", "failed"}:
+            final_state = status
+        else:
+            final_state = "failed"
+        update_fields = {"state": final_state, "stage": final_state}
+        if result.pr_url:
+            update_fields["pr_url"] = result.pr_url
+        self.store.update_run(run_id, **update_fields)
         self.store.add_event(
             run_id,
-            "info" if final_state == "done" else "warning",
+            "info" if final_state in {"done", "pr_open"} else "warning",
             "worker-result",
             f"Worker finished with status {final_state}",
             {
@@ -208,6 +220,8 @@ class Worker:
                 "tests": result.tests,
                 "questions": result.questions,
                 "risks": result.risks,
+                "pr_url": result.pr_url,
+                "decision_log": result.decision_log,
             },
         )
 
@@ -269,7 +283,7 @@ class Worker:
         (run_dir / "error.log").write_text(detail, encoding="utf-8")
         self.store.update_run(run_id, state=state, stage=state, last_error=summary)
         self.store.add_event(run_id, "error", state, summary, {"detail": detail[-4000:]})
-        return WorkerResult(state, summary, [], [], [detail], run_dir)
+        return WorkerResult(state, summary, [], [], [detail], "", [], run_dir)
 
     def _parse_worker_result(self, result_path: Path, stdout: str) -> dict[str, Any]:
         candidates = []

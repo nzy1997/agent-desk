@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "summary", "tests", "questions", "risks"],
+  "required": ["status", "summary", "tests", "questions", "risks", "pr_url", "decision_log"],
   "properties": {
     "status": {
       "type": "string",
@@ -20,6 +20,13 @@
       "items": { "type": "string" }
     },
     "risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "pr_url": {
+      "type": "string"
+    },
+    "decision_log": {
       "type": "array",
       "items": { "type": "string" }
     }

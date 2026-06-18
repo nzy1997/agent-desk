@@ -17,6 +17,7 @@ blocked_label = "agent:blocked"
 needs_review_label = "agent:needs-human-review"
 test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
 
-# Keep these false for the first real dry runs.
+# Keep label mutation disabled until the loop is comfortable.
+# PR creation is enabled for the Superpowers-to-PR flow.
 mutate_github = false
-push_pr = false
+push_pr = true

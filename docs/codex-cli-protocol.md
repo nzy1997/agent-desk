@@ -1,0 +1,46 @@
+# Codex CLI Interaction Protocol
+
+Agent Desk runs Codex CLI as a non-interactive worker. The worker should follow the same Superpowers flow the human owner already uses manually, with Agent Desk supplying standing answers for repetitive prompts.
+
+## Standing Answer Policy
+
+Every worker prompt includes these rules:
+
+- Do not wait for the user or ask interactive questions.
+- For any Superpowers question with a recommended option, choose the option currently marked recommended.
+- If no option is marked recommended, choose the safest conservative option from repository context, issue context, and sibling issues.
+- Record every automatic choice in `decision_log` with the chosen answer and a short reason.
+- Return `blocked` instead of guessing for irreversible data changes, credentials or secrets, unclear public API compatibility, mutually contradictory requirements, or unusually broad unrelated edits.
+
+## Required Workflow
+
+1. Read repository instructions, especially `AGENTS.md` if present.
+2. Use `superpowers:brainstorming` to explore and approve the design under the Standing Answer Policy.
+3. When brainstorming transitions to implementation planning, use `superpowers:writing-plans`.
+4. When asked to choose an execution approach, choose the option currently marked recommended. This is intentionally not hard-coded to Subagent-Driven.
+5. Execute the implementation plan using the chosen recommended Superpowers execution approach.
+6. Run the configured repository test command when applicable.
+7. If `push_pr = true`, choose `Push and create a Pull Request` at the finishing prompt.
+8. If `push_pr = false`, choose `Keep the branch as-is` at the finishing prompt.
+9. Stop after PR creation or local branch completion. Do not merge.
+
+## Result Contract
+
+Codex must return JSON matching `schemas/worker-result.schema.json`:
+
+```json
+{
+  "status": "done",
+  "summary": "Implemented the requested change and opened a PR.",
+  "tests": ["julia --project=. -e 'using Pkg; Pkg.test()' passed"],
+  "questions": [],
+  "risks": [],
+  "pr_url": "https://github.com/OWNER/REPO/pull/123",
+  "decision_log": [
+    "Execution approach: chose the option marked recommended.",
+    "Finishing action: chose Push and create a Pull Request because push_pr=true."
+  ]
+}
+```
+
+When `pr_url` is present, Agent Desk marks the run as `pr_open` and records the URL for dashboard monitoring.

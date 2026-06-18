@@ -115,3 +115,28 @@
 - [x] Implement round-robin repository selection.
 - [x] Add local `nzy1997/Suslin.jl` configuration with `max_concurrent_runs = 3`.
 - [x] Document multiple repository and concurrency behavior.
+
+### Task 6: Fixed Superpowers-To-PR Codex CLI Protocol
+
+**Files:**
+- Modify: `agent_desk/prompt.py`
+- Modify: `agent_desk/worker.py`
+- Modify: `schemas/worker-result.schema.json`
+- Modify: `tests/test_prompt.py`
+- Modify: `tests/test_worker.py`
+- Modify: `README.md`
+- Create: `docs/codex-cli-protocol.md`
+
+**Interfaces:**
+- Produces: Standing Answer Policy in every worker prompt
+- Produces: `pr_url` and `decision_log` fields in worker result JSON
+- Produces: run state `pr_open` when Codex returns a PR URL
+
+- [x] Write a failing test that the prompt uses `superpowers:brainstorming` and `superpowers:writing-plans`.
+- [x] Write a failing test that execution choices follow the option currently marked recommended rather than hard-coding Subagent-Driven.
+- [x] Write a failing test that `push_pr = true` chooses `Push and create a Pull Request`.
+- [x] Write a failing test that `push_pr = false` keeps the branch local.
+- [x] Write a failing test that a returned `pr_url` marks the run `pr_open`.
+- [x] Implement the fixed prompt policy.
+- [x] Extend worker result parsing and schema.
+- [x] Document the Codex CLI protocol.
