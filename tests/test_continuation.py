@@ -220,6 +220,43 @@ class ContinuationTests(unittest.TestCase):
             self.assertEqual(run["state"], "blocked")
             self.assertEqual(run["last_error"], "open-pr returned done without pr_url")
 
+    def test_open_pull_request_uses_configured_closeout_sandbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, worktree = self._store_with_pr_run(root)
+            config = AgentDeskConfig(
+                data_dir=config.data_dir,
+                repos=[
+                    RepoConfig(
+                        name="octo/example",
+                        local_path=root / "repo",
+                        base_branch="main",
+                        closeout_sandbox="danger-full-access",
+                    )
+                ],
+            )
+            store.update_run(run_id, state="running", stage="codex done; resuming to open pull request", pr_url="")
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"opened PR","tests":[],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/10","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+
+            result = ContinuationRunner(config, store, runner).open_pull_request(run_id)
+            call = runner.calls[0]
+
+            self.assertTrue(result.ok)
+            self.assertEqual(call.cwd, worktree)
+            self.assertEqual(
+                call.argv[:8],
+                ["codex", "--ask-for-approval", "never", "--sandbox", "danger-full-access", "-C", str(worktree), "exec"],
+            )
+
     def test_approve_finish_backfills_thread_id_from_historical_stdout_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

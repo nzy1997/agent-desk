@@ -50,6 +50,7 @@ class ContinuationRunner:
             prompt,
             success_state="pr_open",
             success_stage="pull request opened",
+            sandbox=repo.closeout_sandbox,
             require_pr_url=True,
         )
 
