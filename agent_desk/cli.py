@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             thread = threading.Thread(target=active_scheduler.serve_forever, daemon=True)
             thread.start()
         print(f"Agent Desk dashboard: http://{host}:{port}")
-        serve_dashboard(host, port, store, active_scheduler)
+        serve_dashboard(host, port, store, active_scheduler, Path(args.config).expanduser().resolve())
         return 0
     parser.error("unreachable")
     return 2

@@ -8,6 +8,7 @@ import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .config import add_project_to_config, load_config
 from .continuation import ContinuationRunner
 from .scheduler import Scheduler
 from .store import Store
@@ -16,12 +17,23 @@ from .worker import extract_thread_id, format_resume_command
 
 def build_state_payload(store: Store, scheduler: Scheduler | None = None) -> dict[str, Any]:
     payload = store.dashboard_state()
+    repo_paths = {}
+    projects = []
+    if scheduler:
+        for repo in scheduler.config.repos:
+            project = {"name": repo.name, "path": str(repo.local_path)}
+            projects.append(project)
+            repo_paths[repo.name] = project
     for run in payload["runs"]:
         run_dir = Path(run.get("run_dir") or "")
         run["log_files"] = available_log_files(run_dir)
         thread_id = run.get("codex_thread_id") or extract_thread_id_from_run_dir(run_dir)
         run["codex_thread_id"] = thread_id
         run["resume_command"] = format_resume_command(thread_id, str(run.get("worktree_path") or ""))
+        project = repo_paths.get(str(run.get("repo_name") or ""), {})
+        run["project_name"] = project.get("name", run.get("repo_name") or "")
+        run["project_path"] = project.get("path", "")
+    payload["projects"] = projects
     payload["app"] = "Agent Desk"
     payload["scheduler"] = {"paused": scheduler.paused if scheduler else False}
     return payload
@@ -42,6 +54,10 @@ LOG_FILE_ORDER = [
     "approve-finish.stdout.jsonl",
     "approve-finish.stderr.log",
     "approve-finish-result.json",
+    "open-pr-prompt.md",
+    "open-pr.stdout.jsonl",
+    "open-pr.stderr.log",
+    "open-pr-result.json",
     "git-fetch.stderr.log",
     "git-fetch.stdout.log",
     "git-worktree.stderr.log",
@@ -69,7 +85,11 @@ def extract_thread_id_from_run_dir(run_dir: Path) -> str:
     return extract_thread_id(stdout_path.read_text(encoding="utf-8", errors="replace"))
 
 
-def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    store: Store,
+    scheduler: Scheduler | None = None,
+    config_path: Path | None = None,
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             path = urlparse(self.path).path
@@ -109,6 +129,24 @@ def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseH
                 run_id = int(path.split("/")[3])
                 self._start_continuation("approve_finish", run_id)
                 self._send_json({"ok": True, "message": "Approve and finish started", "run_id": run_id})
+                return
+            if path == "/api/projects":
+                if not config_path or not scheduler:
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "config path unavailable")
+                    return
+                payload = self._read_json()
+                folder = str(payload.get("path") or "").strip()
+                if not folder:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "path is required")
+                    return
+                try:
+                    repo = add_project_to_config(config_path, folder)
+                    scheduler.config = load_config(config_path)
+                    scheduler.worker.config = scheduler.config
+                except ValueError as exc:
+                    self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self._send_json({"ok": True, "repo": {"name": repo.name, "path": str(repo.local_path)}})
                 return
             if path == "/api/actions/pause":
                 scheduler.pause()
@@ -177,8 +215,14 @@ def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseH
     return Handler
 
 
-def serve_dashboard(host: str, port: int, store: Store, scheduler: Scheduler | None = None) -> None:
-    server = ThreadingHTTPServer((host, port), make_handler(store, scheduler))
+def serve_dashboard(
+    host: str,
+    port: int,
+    store: Store,
+    scheduler: Scheduler | None = None,
+    config_path: Path | None = None,
+) -> None:
+    server = ThreadingHTTPServer((host, port), make_handler(store, scheduler, config_path))
     try:
         server.serve_forever()
     finally:
@@ -251,7 +295,7 @@ HTML = """<!doctype html>
       text-transform: uppercase;
       letter-spacing: .02em;
     }
-    .metric-row, .run, .event {
+    .metric-row, .run, .event, .project-row {
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
@@ -259,6 +303,31 @@ HTML = """<!doctype html>
       margin-bottom: 8px;
     }
     .metric-row { display: flex; justify-content: space-between; }
+    .project-row {
+      width: 100%;
+      text-align: left;
+      display: block;
+    }
+    .project-form {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .project-form input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px 8px;
+      font: inherit;
+    }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .section-head h2 { margin: 0; }
     .muted { color: var(--muted); }
     .state-running { color: var(--accent); }
     .state-ready { color: var(--warn); }
@@ -348,10 +417,17 @@ HTML = """<!doctype html>
   <main>
     <section>
       <h2>Queue</h2>
+      <div class="project-form">
+        <input id="project-path" placeholder="/path/to/project">
+        <button onclick="addProject()">Add project</button>
+      </div>
       <div id="stats"></div>
     </section>
     <section>
-      <h2>Current Runs</h2>
+      <div class="section-head">
+        <h2 id="runs-title">Current Runs</h2>
+        <button id="project-back" onclick="backToProjects()" style="display:none">Back to folders</button>
+      </div>
       <div id="runs"></div>
     </section>
     <section>
@@ -367,11 +443,12 @@ HTML = """<!doctype html>
       await refresh();
     }
     async function postJson(path, body) {
-      await fetch(path, {
+      const res = await fetch(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body || {})
       });
+      if (!res.ok) throw new Error(await res.text());
       await refresh();
     }
     function esc(value) {
@@ -382,6 +459,32 @@ HTML = """<!doctype html>
     }
     async function copyResume(command) {
       await navigator.clipboard.writeText(command);
+    }
+    async function addProject() {
+      const input = document.getElementById('project-path');
+      const path = input.value.trim();
+      if (!path) return;
+      try {
+        await postJson('/api/projects', { path });
+        input.value = '';
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    }
+    function selectedProjectPath() {
+      if (!location.hash.startsWith('#project=')) return '';
+      return decodeURIComponent(location.hash.slice('#project='.length));
+    }
+    function selectProject(path) {
+      location.hash = `project=${encodeURIComponent(path)}`;
+      refresh();
+    }
+    function selectProjectByPath(button) {
+      selectProject(button.dataset.path || '');
+    }
+    function backToProjects() {
+      history.pushState('', document.title, location.pathname + location.search);
+      refresh();
     }
     function logLinks(run) {
       const files = run.log_files || [];
@@ -427,6 +530,41 @@ HTML = """<!doctype html>
         ${logLinks(run)}
       </div>`;
     }
+    function stateCounts(runs) {
+      return runs.reduce((counts, run) => {
+        counts[run.state] = (counts[run.state] || 0) + 1;
+        return counts;
+      }, {});
+    }
+    function stateSummary(runs) {
+      const counts = stateCounts(runs);
+      return Object.entries(counts).sort().map(([key, value]) => `${key} ${value}`).join(' · ') || 'no runs';
+    }
+    function projectHtml(project, state) {
+      const runs = state.runs.filter(run => run.project_path === project.path);
+      return `<button class="project-row" data-path="${esc(project.path)}" onclick="selectProjectByPath(this)">
+        <strong>${esc(project.name)}</strong>
+        <div class="muted">${esc(project.path)}</div>
+        <div>${runs.length} runs · ${esc(stateSummary(runs))}</div>
+      </button>`;
+    }
+    function renderProjectIndex(state) {
+      const projects = state.projects || [];
+      document.getElementById('runs-title').textContent = 'Current Runs';
+      document.getElementById('project-back').style.display = 'none';
+      return projects.map(project => projectHtml(project, state)).join('') || '<div class="muted">No project folders</div>';
+    }
+    function renderSelectedProject(state, path) {
+      const project = (state.projects || []).find(item => item.path === path);
+      const runs = state.runs.filter(run => run.project_path === path);
+      document.getElementById('runs-title').textContent = project ? project.name : 'Project Runs';
+      document.getElementById('project-back').style.display = '';
+      return runs.slice(0, 24).map(runHtml).join('') || '<div class="muted">No runs in this folder</div>';
+    }
+    function renderRuns(state) {
+      const path = selectedProjectPath();
+      return path ? renderSelectedProject(state, path) : renderProjectIndex(state);
+    }
     async function refresh() {
       const res = await fetch('/api/state');
       const state = await res.json();
@@ -435,7 +573,7 @@ HTML = """<!doctype html>
       document.getElementById('stats').innerHTML = Object.entries(stats).sort().map(([key, value]) =>
         `<div class="metric-row"><span>${esc(key)}</span><strong>${value}</strong></div>`
       ).join('') || '<div class="muted">No runs yet</div>';
-      document.getElementById('runs').innerHTML = state.runs.slice(0, 12).map(runHtml).join('') || '<div class="muted">Idle</div>';
+      document.getElementById('runs').innerHTML = renderRuns(state);
       document.getElementById('attention').innerHTML = state.runs
         .filter(run => ['blocked','failed','needs_review'].includes(run.state))
         .slice(0, 8).map(runHtml).join('') || '<div class="muted">Nothing needs you</div>';
@@ -447,6 +585,7 @@ HTML = """<!doctype html>
       ).join('') || '<div class="muted">No events</div>';
     }
     refresh();
+    window.addEventListener('hashchange', refresh);
     setInterval(refresh, 2000);
   </script>
 </body>

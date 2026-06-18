@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+import re
+import subprocess
 import tomllib
 
 
@@ -74,6 +77,100 @@ def load_config(path: str | Path) -> AgentDeskConfig:
         worker_timeout_seconds=int(desk_raw.get("worker_timeout_seconds", 7200)),
         worker_idle_timeout_seconds=int(desk_raw.get("worker_idle_timeout_seconds", 600)),
         repos=repos,
+    )
+
+
+def parse_github_repo_name(remote_url: str) -> str:
+    patterns = [
+        r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$",
+        r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$",
+        r"^ssh://git@github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, remote_url.strip())
+        if match:
+            return f"{match.group('owner')}/{match.group('repo')}"
+    return ""
+
+
+def infer_repo_name(local_path: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(local_path), "remote", "get-url", "origin"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return ""
+    return parse_github_repo_name(completed.stdout.strip())
+
+
+def add_project_to_config(config_path: str | Path, local_path: str | Path, repo_name: str = "") -> RepoConfig:
+    path = Path(local_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve()
+    if not path.exists() or not path.is_dir():
+        raise ValueError(f"project folder does not exist: {path}")
+
+    config_path = Path(config_path).expanduser()
+    if not config_path.is_absolute():
+        config_path = Path.cwd() / config_path
+    config = load_config(config_path)
+    for repo in config.repos:
+        if repo.local_path.resolve() == path or (repo_name and repo.name == repo_name):
+            return repo
+
+    name = repo_name or infer_repo_name(path)
+    if not name:
+        raise ValueError("could not infer GitHub repo name from origin remote")
+
+    template = config.repos[0] if config.repos else RepoConfig(name=name, local_path=path)
+    repo = RepoConfig(
+        name=name,
+        local_path=path,
+        base_branch=template.base_branch,
+        ready_label=template.ready_label,
+        running_label=template.running_label,
+        pr_open_label=template.pr_open_label,
+        blocked_label=template.blocked_label,
+        needs_review_label=template.needs_review_label,
+        test_command=template.test_command,
+        mutate_github=template.mutate_github,
+        push_pr=template.push_pr,
+        closeout_sandbox=template.closeout_sandbox,
+    )
+    with config_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n\n")
+        handle.write(_repo_config_toml(repo))
+    return repo
+
+
+def _toml_string(value: str | Path) -> str:
+    return json.dumps(str(value))
+
+
+def _toml_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _repo_config_toml(repo: RepoConfig) -> str:
+    return "\n".join(
+        [
+            "[[repos]]",
+            f"name = {_toml_string(repo.name)}",
+            f"local_path = {_toml_string(repo.local_path)}",
+            f"base_branch = {_toml_string(repo.base_branch)}",
+            f"ready_label = {_toml_string(repo.ready_label)}",
+            f"running_label = {_toml_string(repo.running_label)}",
+            f"pr_open_label = {_toml_string(repo.pr_open_label)}",
+            f"blocked_label = {_toml_string(repo.blocked_label)}",
+            f"needs_review_label = {_toml_string(repo.needs_review_label)}",
+            f"test_command = {_toml_string(repo.test_command)}",
+            f"mutate_github = {_toml_bool(repo.mutate_github)}",
+            f"push_pr = {_toml_bool(repo.push_pr)}",
+            f"closeout_sandbox = {_toml_string(repo.closeout_sandbox)}",
+        ]
     )
 
 
