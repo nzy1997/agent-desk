@@ -1,10 +1,11 @@
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
 from agent_desk.store import Store
-from agent_desk.worker import CommandResult, FakeCommandRunner, Worker, extract_thread_id
+from agent_desk.worker import CommandResult, CommandRunner, FakeCommandRunner, Worker, extract_thread_id
 
 
 class WorkerTests(unittest.TestCase):
@@ -52,6 +53,7 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("--json", codex_call.argv)
             self.assertIn("--sandbox", codex_call.argv)
             self.assertIn("workspace-write", codex_call.argv)
+            self.assertEqual(codex_call.idle_timeout, config.worker_idle_timeout_seconds)
             self.assertEqual(result.status, "done")
             self.assertTrue((config.data_dir / "runs" / "issue-7" / "run-1" / "prompt.md").exists())
             self.assertTrue((config.data_dir / "runs" / "issue-7" / "run-1" / "stdout.jsonl").exists())
@@ -274,6 +276,33 @@ class WorkerTests(unittest.TestCase):
         )
 
         self.assertEqual(extract_thread_id(stdout), "019ed932-fe5d-7391-b856-98b2239a6380")
+
+    def test_command_runner_streams_logs_and_kills_idle_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout_path = root / "stdout.log"
+            stderr_path = root / "stderr.log"
+
+            result = CommandRunner().run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; print('first event', flush=True); time.sleep(3)",
+                ],
+                timeout=10,
+                idle_timeout=0.2,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+            )
+            stdout_text = stdout_path.read_text(encoding="utf-8")
+            stderr_text = stderr_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.timeout_reason, "idle")
+        self.assertIn("first event", result.stdout)
+        self.assertIn("first event", stdout_text)
+        self.assertIn("idle timeout", result.stderr)
+        self.assertIn("idle timeout", stderr_text)
 
 
 if __name__ == "__main__":

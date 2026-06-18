@@ -15,6 +15,7 @@ class ConfigTests(unittest.TestCase):
 [agent_desk]
 data_dir = ".agent-desk"
 poll_interval_seconds = 15
+worker_idle_timeout_seconds = 33
 
 [[repos]]
 name = "octo/example"
@@ -30,6 +31,7 @@ closeout_sandbox = "danger-full-access"
 
         self.assertEqual(config.data_dir, Path(tmp) / ".agent-desk")
         self.assertEqual(config.poll_interval_seconds, 15)
+        self.assertEqual(config.worker_idle_timeout_seconds, 33)
         self.assertEqual(len(config.repos), 1)
         repo = config.repos[0]
         self.assertEqual(repo.name, "octo/example")

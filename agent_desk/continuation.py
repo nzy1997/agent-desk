@@ -94,13 +94,15 @@ class ContinuationRunner:
             cwd=worktree_path,
             stdin=prompt,
             timeout=self.config.worker_timeout_seconds,
+            idle_timeout=self.config.worker_idle_timeout_seconds,
             stdout_path=run_dir / f"{action}.stdout.jsonl",
             stderr_path=run_dir / f"{action}.stderr.log",
         )
         if completed.returncode != 0:
-            self.store.update_run(run_id, state="failed", stage="failed", last_error=f"{action} failed")
-            self.store.add_event(run_id, "error", action, f"{action} failed", {"detail": completed.stderr[-4000:]})
-            return ContinuationResult(False, f"{action} failed", run_id)
+            summary = "codex idle timeout" if completed.timeout_reason == "idle" else f"{action} failed"
+            self.store.update_run(run_id, state="failed", stage="failed", last_error=summary)
+            self.store.add_event(run_id, "error", action, summary, {"detail": completed.stderr[-4000:]})
+            return ContinuationResult(False, summary, run_id)
 
         payload = parse_resume_result(result_path, completed.stdout)
         status = str(payload.get("status") or "failed")

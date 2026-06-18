@@ -60,6 +60,7 @@ class ContinuationTests(unittest.TestCase):
 
             self.assertTrue(result.ok)
             self.assertEqual(call.argv[:8], ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "-C", str(worktree), "exec"])
+            self.assertEqual(call.idle_timeout, config.worker_idle_timeout_seconds)
             self.assertIn("resume", call.argv)
             self.assertIn("019ed932-fe5d-7391-b856-98b2239a6380", call.argv)
             self.assertIn("Please rename the CI job to Full Suite.", call.stdin)

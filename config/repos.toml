@@ -5,6 +5,7 @@ max_concurrent_runs = 3
 dashboard_host = "127.0.0.1"
 dashboard_port = 8765
 worker_timeout_seconds = 7200
+worker_idle_timeout_seconds = 600
 
 [[repos]]
 name = "nzy1997/Suslin.jl"

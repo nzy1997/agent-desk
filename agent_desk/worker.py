@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import threading
+import time
 from typing import Any
 
 from .config import AgentDeskConfig, RepoConfig
@@ -19,6 +21,7 @@ class CommandResult:
     returncode: int
     stdout: str
     stderr: str
+    timeout_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,7 @@ class CommandCall:
     cwd: Path | None
     stdin: str
     timeout: int | None
+    idle_timeout: float | None = None
 
 
 @dataclass(frozen=True)
@@ -49,23 +53,91 @@ class CommandRunner:
         cwd: Path | None = None,
         stdin: str = "",
         timeout: int | None = None,
+        idle_timeout: float | None = None,
         stdout_path: Path | None = None,
         stderr_path: Path | None = None,
     ) -> CommandResult:
-        completed = subprocess.run(
+        started_at = time.monotonic()
+        last_output_at = started_at
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        lock = threading.Lock()
+        stdout_handle = stdout_path.open("w", encoding="utf-8") if stdout_path else None
+        stderr_handle = stderr_path.open("w", encoding="utf-8") if stderr_path else None
+
+        def append_output(chunks: list[str], handle: Any, text: str) -> None:
+            nonlocal last_output_at
+            with lock:
+                chunks.append(text)
+                last_output_at = time.monotonic()
+                if handle:
+                    handle.write(text)
+                    handle.flush()
+
+        def read_stream(stream: Any, chunks: list[str], handle: Any) -> None:
+            try:
+                for line in stream:
+                    append_output(chunks, handle, line)
+            finally:
+                stream.close()
+
+        process = subprocess.Popen(
             argv,
             cwd=cwd,
-            input=stdin,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            bufsize=1,
         )
-        if stdout_path:
-            stdout_path.write_text(completed.stdout, encoding="utf-8")
-        if stderr_path:
-            stderr_path.write_text(completed.stderr, encoding="utf-8")
-        return CommandResult(argv, completed.returncode, completed.stdout, completed.stderr)
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_chunks, stdout_handle), daemon=True)
+        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_chunks, stderr_handle), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        if process.stdin is not None:
+            try:
+                process.stdin.write(stdin)
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+
+        timeout_reason = ""
+        while process.poll() is None:
+            now = time.monotonic()
+            if timeout is not None and now - started_at >= timeout:
+                timeout_reason = "timeout"
+                break
+            if idle_timeout is not None and now - last_output_at >= idle_timeout:
+                timeout_reason = "idle"
+                break
+            time.sleep(0.05)
+
+        if timeout_reason:
+            process.kill()
+
+        returncode = process.wait()
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+
+        if timeout_reason:
+            elapsed = time.monotonic() - started_at
+            idle_for = time.monotonic() - last_output_at
+            append_output(
+                stderr_chunks,
+                stderr_handle,
+                f"\nagent-desk: {timeout_reason} timeout killed process after {elapsed:.1f}s"
+                f" (idle for {idle_for:.1f}s)\n",
+            )
+
+        if stdout_handle:
+            stdout_handle.close()
+        if stderr_handle:
+            stderr_handle.close()
+
+        return CommandResult(argv, returncode, "".join(stdout_chunks), "".join(stderr_chunks), timeout_reason)
 
 
 class FakeCommandRunner(CommandRunner):
@@ -80,10 +152,11 @@ class FakeCommandRunner(CommandRunner):
         cwd: Path | None = None,
         stdin: str = "",
         timeout: int | None = None,
+        idle_timeout: float | None = None,
         stdout_path: Path | None = None,
         stderr_path: Path | None = None,
     ) -> CommandResult:
-        self.calls.append(CommandCall(argv, cwd, stdin, timeout))
+        self.calls.append(CommandCall(argv, cwd, stdin, timeout, idle_timeout))
         result = self.results.pop(0)
         if stdout_path:
             stdout_path.write_text(result.stdout, encoding="utf-8")
@@ -183,11 +256,13 @@ class Worker:
             cwd=worktree_path,
             stdin=prompt,
             timeout=self.config.worker_timeout_seconds,
+            idle_timeout=self.config.worker_idle_timeout_seconds,
             stdout_path=run_dir / "stdout.jsonl",
             stderr_path=run_dir / "stderr.log",
         )
         if codex.returncode != 0:
-            return self._fail(run_id, run_dir, "failed", "codex exec failed", codex.stderr)
+            summary = "codex idle timeout" if codex.timeout_reason == "idle" else "codex exec failed"
+            return self._fail(run_id, run_dir, "failed", summary, codex.stderr)
 
         thread_id = extract_thread_id(codex.stdout)
         if thread_id:

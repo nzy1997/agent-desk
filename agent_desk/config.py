@@ -29,6 +29,7 @@ class AgentDeskConfig:
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
     worker_timeout_seconds: int = 7200
+    worker_idle_timeout_seconds: int = 600
     repos: list[RepoConfig] = field(default_factory=list)
 
 
@@ -71,6 +72,7 @@ def load_config(path: str | Path) -> AgentDeskConfig:
         dashboard_host=desk_raw.get("dashboard_host", "127.0.0.1"),
         dashboard_port=int(desk_raw.get("dashboard_port", 8765)),
         worker_timeout_seconds=int(desk_raw.get("worker_timeout_seconds", 7200)),
+        worker_idle_timeout_seconds=int(desk_raw.get("worker_idle_timeout_seconds", 600)),
         repos=repos,
     )
 
@@ -83,6 +85,7 @@ max_concurrent_runs = 1
 dashboard_host = "127.0.0.1"
 dashboard_port = 8765
 worker_timeout_seconds = 7200
+worker_idle_timeout_seconds = 600
 
 [[repos]]
 name = "OWNER/REPO"
