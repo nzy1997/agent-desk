@@ -52,6 +52,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("superpowers:writing-plans", prompt)
         self.assertIn("choose the option currently marked recommended", prompt)
         self.assertNotIn("Choose: Subagent-Driven", prompt)
+        self.assertIn("After implementation and verification are complete, create a pull request", prompt)
         self.assertIn("Push and create a Pull Request", prompt)
         self.assertIn("decision_log", prompt)
         self.assertIn("Stop after the pull request is created", prompt)

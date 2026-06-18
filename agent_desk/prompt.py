@@ -14,7 +14,12 @@ def render_worker_prompt(
 ) -> str:
     test_line = repo.test_command or "Use the repository's documented test command."
     if repo.push_pr:
+        completion_instruction = (
+            "After implementation and verification are complete, create a pull request for the worker branch before "
+            "returning done. Do not stop at a local commit."
+        )
         finish_instruction = (
+            "After implementation and verification are complete, create a pull request.\n"
             'When finishing asks what to do with the branch, choose "Push and create a Pull Request".\n'
             "8. Stop after the pull request is created. Do not merge.\n"
             '9. If implementation and verification are complete but the only failed step is creating the pull request, '
@@ -22,6 +27,10 @@ def render_worker_prompt(
             "manager process. Record the PR creation failure in risks or questions."
         )
     else:
+        completion_instruction = (
+            "After implementation and verification are complete, leave the worker branch ready for local review before "
+            "returning done. Do not push or merge."
+        )
         finish_instruction = (
             'When finishing asks what to do with the branch, choose "Keep the branch as-is".\n'
             "8. Stop after the local branch is ready. Do not push, open a pull request, or merge."
@@ -31,6 +40,7 @@ def render_worker_prompt(
 This is a non-interactive Agent Desk run. Do not wait for the user.
 Do not ask interactive questions.
 Use the repository's existing Codex/Superpowers workflows all the way to a pull request.
+{completion_instruction}
 
 Repository: {repo.name}
 Base branch: {repo.base_branch}

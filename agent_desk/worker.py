@@ -281,6 +281,35 @@ class Worker:
             decision_log=[str(item) for item in payload.get("decision_log", [])],
             run_dir=run_dir,
         )
+        result_payload = {
+            "summary": result.summary,
+            "tests": result.tests,
+            "questions": result.questions,
+            "risks": result.risks,
+            "pr_url": result.pr_url,
+            "decision_log": result.decision_log,
+        }
+        if status == "done":
+            if result.pr_url:
+                codex_done_message = "Codex returned done with pull request"
+            elif repo.push_pr:
+                codex_done_message = "Codex returned done; opening pull request"
+            else:
+                codex_done_message = "Codex returned done"
+            self.store.add_event(run_id, "info", "codex-done", codex_done_message, result_payload)
+
+        if status == "done" and repo.push_pr and not result.pr_url:
+            self.store.update_run(run_id, state="running", stage="codex done; opening pull request", last_error="")
+            self.store.add_event(
+                run_id,
+                "info",
+                "worker-result",
+                "Worker finished with status done; manager is opening pull request",
+                result_payload,
+            )
+            self._push_and_open_pr(run_id, repo, issue_number, issue_title, branch_name, worktree_path, run_dir)
+            return result
+
         if result.pr_url:
             final_state = "pr_open"
         elif status in {"done", "blocked", "failed"}:
@@ -296,18 +325,9 @@ class Worker:
             "info" if final_state in {"done", "pr_open"} else "warning",
             "worker-result",
             f"Worker finished with status {final_state}",
-            {
-                "summary": result.summary,
-                "tests": result.tests,
-                "questions": result.questions,
-                "risks": result.risks,
-                "pr_url": result.pr_url,
-                "decision_log": result.decision_log,
-            },
+            result_payload,
         )
 
-        if final_state == "done" and repo.push_pr:
-            self._push_and_open_pr(run_id, repo, issue_number, issue_title, branch_name, worktree_path, run_dir)
         return result
 
     def _worktree_path(self, repo: RepoConfig, issue_number: int, branch_name: str, attempt: int) -> Path:

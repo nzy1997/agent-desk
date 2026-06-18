@@ -153,9 +153,16 @@ class WorkerTests(unittest.TestCase):
                 branch_name="agent/issue-9-fallback-pr",
             )
             run = store.get_run(run_id)
+            codex_done_events = [
+                event
+                for event in store.dashboard_state()["events"]
+                if event["run_id"] == run_id and event["event_type"] == "codex-done"
+            ]
 
             self.assertEqual(run["state"], "pr_open")
             self.assertEqual(run["pr_url"], "https://github.com/octo/example/pull/10")
+            self.assertEqual(len(codex_done_events), 1)
+            self.assertEqual(codex_done_events[0]["message"], "Codex returned done; opening pull request")
 
     def test_manager_blocks_when_pr_create_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
