@@ -293,21 +293,23 @@ class Worker:
             if result.pr_url:
                 codex_done_message = "Codex returned done with pull request"
             elif repo.push_pr:
-                codex_done_message = "Codex returned done; opening pull request"
+                codex_done_message = "Codex returned done; resuming to open pull request"
             else:
                 codex_done_message = "Codex returned done"
             self.store.add_event(run_id, "info", "codex-done", codex_done_message, result_payload)
 
         if status == "done" and repo.push_pr and not result.pr_url:
-            self.store.update_run(run_id, state="running", stage="codex done; opening pull request", last_error="")
+            self.store.update_run(run_id, state="running", stage="codex done; resuming to open pull request", last_error="")
             self.store.add_event(
                 run_id,
                 "info",
                 "worker-result",
-                "Worker finished with status done; manager is opening pull request",
+                "Worker finished with status done; resuming Codex to open pull request",
                 result_payload,
             )
-            self._push_and_open_pr(run_id, repo, issue_number, issue_title, branch_name, worktree_path, run_dir)
+            from .continuation import ContinuationRunner
+
+            ContinuationRunner(self.config, self.store, self.runner).open_pull_request(run_id)
             return result
 
         if result.pr_url:
@@ -334,64 +336,6 @@ class Worker:
         repo_slug = slugify(repo.name)
         branch_slug = slugify(branch_name)
         return self.config.data_dir / "worktrees" / repo_slug / f"issue-{issue_number}-run-{attempt}-{branch_slug}"
-
-    def _push_and_open_pr(
-        self,
-        run_id: int,
-        repo: RepoConfig,
-        issue_number: int,
-        issue_title: str,
-        branch_name: str,
-        worktree_path: Path,
-        run_dir: Path,
-    ) -> None:
-        self.store.update_run(run_id, stage="opening pull request")
-        push = self.runner.run(
-            ["git", "-C", str(worktree_path), "push", "-u", "origin", branch_name],
-            stdout_path=run_dir / "git-push.stdout.log",
-            stderr_path=run_dir / "git-push.stderr.log",
-        )
-        if push.returncode != 0:
-            self._block_pr_open(run_id, "git push failed", push.stderr)
-            return
-
-        body_path = run_dir / "pr-body.md"
-        body_path.write_text(
-            f"Fixes #{issue_number}\n\nCreated by Agent Desk from issue #{issue_number}.\n",
-            encoding="utf-8",
-        )
-        pr = self.runner.run(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--repo",
-                repo.name,
-                "--head",
-                branch_name,
-                "--base",
-                repo.base_branch,
-                "--draft",
-                "--title",
-                f"Fix #{issue_number}: {issue_title}",
-                "--body-file",
-                str(body_path),
-            ],
-            stdout_path=run_dir / "gh-pr-create.stdout.log",
-            stderr_path=run_dir / "gh-pr-create.stderr.log",
-        )
-        pr_url = pr.stdout.strip().splitlines()[-1] if pr.stdout.strip() else ""
-        if pr.returncode != 0 or not pr_url:
-            detail = pr.stderr or pr.stdout or "gh pr create did not return a pull request URL"
-            self._block_pr_open(run_id, "gh pr create failed", detail)
-            return
-
-        self.store.update_run(run_id, state="pr_open", stage="pull request opened", pr_url=pr_url)
-        self.store.add_event(run_id, "info", "pr", "Opened draft pull request", {"url": pr_url})
-
-    def _block_pr_open(self, run_id: int, summary: str, detail: str) -> None:
-        self.store.update_run(run_id, state="blocked", stage="blocked", last_error=summary)
-        self.store.add_event(run_id, "error", "pr", summary, {"detail": detail[-4000:]})
 
     def _write_resume_log(self, run_dir: Path, thread_id: str, worktree_path: Path) -> None:
         command = format_resume_command(thread_id, str(worktree_path))

@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 
 from .config import example_config, load_config
+from .continuation import ContinuationRunner
 from .dashboard import serve_dashboard
 from .scheduler import Scheduler
 from .store import Store
@@ -26,6 +27,10 @@ def main(argv: list[str] | None = None) -> int:
     run_next = sub.add_parser("run-next", help="claim and run the next ready issue")
     run_next.add_argument("--config", default="config/repos.toml")
 
+    open_pr = sub.add_parser("open-pr", help="resume a Codex thread to open a pull request for a run")
+    open_pr.add_argument("--config", default="config/repos.toml")
+    open_pr.add_argument("--run-id", type=int, required=True)
+
     args = parser.parse_args(argv)
     if args.command == "init-config":
         path = Path(args.path)
@@ -43,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
         result = scheduler.run_next()
         print(result.message)
         return 0 if result.started else 1
+    if args.command == "open-pr":
+        result = ContinuationRunner(config, store).open_pull_request(args.run_id)
+        print(result.message)
+        return 0 if result.ok else 1
     if args.command == "serve":
         host = args.host or config.dashboard_host
         port = args.port or config.dashboard_port

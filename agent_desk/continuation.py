@@ -40,6 +40,19 @@ class ContinuationRunner:
             sandbox=repo.closeout_sandbox,
         )
 
+    def open_pull_request(self, run_id: int) -> ContinuationResult:
+        run = self.store.get_run(run_id)
+        repo = self._repo_for_run(run)
+        prompt = render_open_pull_request_prompt(run, base_branch=repo.base_branch)
+        return self._resume(
+            run_id,
+            "open-pr",
+            prompt,
+            success_state="pr_open",
+            success_stage="pull request opened",
+            require_pr_url=True,
+        )
+
     def _repo_for_run(self, run: dict[str, Any]) -> RepoConfig:
         for repo in self.config.repos:
             if repo.name == run["repo_name"]:
@@ -55,6 +68,7 @@ class ContinuationRunner:
         success_state: str,
         success_stage: str,
         sandbox: str = "workspace-write",
+        require_pr_url: bool = False,
     ) -> ContinuationResult:
         run = self.store.get_run(run_id)
         worktree_raw = str(run.get("worktree_path") or "")
@@ -109,6 +123,11 @@ class ContinuationRunner:
         summary = str(payload.get("summary") or status)
         if status == "done":
             pr_url = str(payload.get("pr_url") or run.get("pr_url") or "")
+            if require_pr_url and not pr_url:
+                message = f"{action} returned done without pr_url"
+                self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
+                self.store.add_event(run_id, "warning", action, message, payload)
+                return ContinuationResult(False, message, run_id)
             self.store.update_run(run_id, state=success_state, stage=success_stage, pr_url=pr_url, last_error="")
             self.store.add_event(run_id, "info", action, summary, payload)
             return ContinuationResult(True, summary, run_id)
@@ -172,6 +191,25 @@ Human feedback:
 Continue from the existing Codex thread context. Address the feedback with the smallest appropriate change, run relevant verification, and push the updates to the existing PR branch. Do not merge the PR.
 
 Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.
+"""
+
+
+def render_open_pull_request_prompt(run: dict[str, Any], *, base_branch: str) -> str:
+    return f"""Implementation work is complete for this Agent Desk run, but no pull request URL was returned.
+
+Repository: {run['repo_name']}
+Issue: #{run['issue_number']} {run['issue_title']}
+Issue URL: {run['issue_url']}
+Base branch: {base_branch}
+Worker branch: {run['branch_name']}
+
+Continue from the existing Codex thread context. Do not redo the implementation.
+Inspect the current worktree and recent commits, then push the worker branch and create a draft pull request targeting {base_branch}.
+If a pull request already exists for this branch, reuse it and return its URL.
+Do not merge the pull request.
+If GitHub, network, credentials, or tool permissions prevent opening or finding the pull request, return status "blocked" with the exact reason.
+
+Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log. status "done" requires pr_url to be the pull request URL.
 """
 
 

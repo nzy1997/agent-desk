@@ -168,6 +168,58 @@ class ContinuationTests(unittest.TestCase):
                 ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "-C", str(worktree), "exec"],
             )
 
+    def test_open_pull_request_resumes_thread_and_requires_pr_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, worktree = self._store_with_pr_run(root)
+            store.update_run(run_id, state="running", stage="codex done; resuming to open pull request", pr_url="")
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"opened PR","tests":[],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/10","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+
+            result = ContinuationRunner(config, store, runner).open_pull_request(run_id)
+            call = runner.calls[0]
+            run = store.get_run(run_id)
+
+            self.assertTrue(result.ok)
+            self.assertEqual(call.cwd, worktree)
+            self.assertIn("Implementation work is complete", call.stdin)
+            self.assertIn("create a draft pull request", call.stdin)
+            self.assertIn("Do not merge", call.stdin)
+            self.assertEqual(run["state"], "pr_open")
+            self.assertEqual(run["stage"], "pull request opened")
+            self.assertEqual(run["pr_url"], "https://github.com/octo/example/pull/10")
+
+    def test_open_pull_request_blocks_when_resume_done_without_pr_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, _worktree = self._store_with_pr_run(root)
+            store.update_run(run_id, state="running", stage="codex done; resuming to open pull request", pr_url="")
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"finished but no URL","tests":[],"questions":[],"risks":[],"pr_url":"","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+
+            result = ContinuationRunner(config, store, runner).open_pull_request(run_id)
+            run = store.get_run(run_id)
+
+            self.assertFalse(result.ok)
+            self.assertEqual(run["state"], "blocked")
+            self.assertEqual(run["last_error"], "open-pr returned done without pr_url")
+
     def test_approve_finish_backfills_thread_id_from_historical_stdout_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

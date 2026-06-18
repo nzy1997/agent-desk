@@ -107,7 +107,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(run["state"], "pr_open")
             self.assertEqual(run["pr_url"], "https://github.com/octo/example/pull/9")
 
-    def test_manager_opens_pr_when_codex_finishes_without_pr_url(self):
+    def test_worker_resumes_codex_to_open_pr_when_codex_finishes_without_pr_url(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo_path = root / "repo"
@@ -120,6 +120,7 @@ class WorkerTests(unittest.TestCase):
                 test_command="python -m unittest",
                 push_pr=True,
             )
+            config = AgentDeskConfig(data_dir=root / "data", repos=[repo])
             store = Store(root / "desk.sqlite")
             run_id = store.create_run(
                 repo_name=repo.name,
@@ -135,11 +136,20 @@ class WorkerTests(unittest.TestCase):
                     CommandResult(
                         ["codex", "exec"],
                         0,
-                        '{"status":"done","summary":"ok","tests":[],"questions":[],"risks":["worker could not create PR"],"pr_url":"","decision_log":[]}',
+                        "\n".join(
+                            [
+                                '{"type":"thread.started","thread_id":"019ed932-fe5d-7391-b856-98b2239a6380"}',
+                                '{"status":"done","summary":"ok","tests":[],"questions":[],"risks":["worker could not create PR"],"pr_url":"","decision_log":[]}',
+                            ]
+                        ),
                         "",
                     ),
-                    CommandResult(["git", "push"], 0, "", ""),
-                    CommandResult(["gh", "pr", "create"], 0, "https://github.com/octo/example/pull/10\n", ""),
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"opened PR","tests":[],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/10","decision_log":[]}',
+                        "",
+                    ),
                 ]
             )
 
@@ -161,10 +171,16 @@ class WorkerTests(unittest.TestCase):
 
             self.assertEqual(run["state"], "pr_open")
             self.assertEqual(run["pr_url"], "https://github.com/octo/example/pull/10")
+            self.assertEqual(len(runner.calls), 4)
+            resume_call = runner.calls[3]
+            self.assertIn("resume", resume_call.argv)
+            self.assertIn("019ed932-fe5d-7391-b856-98b2239a6380", resume_call.argv)
+            self.assertIn("create a draft pull request", resume_call.stdin)
+            self.assertNotIn("Created by Agent Desk", resume_call.stdin)
             self.assertEqual(len(codex_done_events), 1)
-            self.assertEqual(codex_done_events[0]["message"], "Codex returned done; opening pull request")
+            self.assertEqual(codex_done_events[0]["message"], "Codex returned done; resuming to open pull request")
 
-    def test_manager_blocks_when_pr_create_fails(self):
+    def test_worker_blocks_when_open_pr_resume_cannot_create_pr(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo_path = root / "repo"
@@ -177,6 +193,7 @@ class WorkerTests(unittest.TestCase):
                 test_command="python -m unittest",
                 push_pr=True,
             )
+            config = AgentDeskConfig(data_dir=root / "data", repos=[repo])
             store = Store(root / "desk.sqlite")
             run_id = store.create_run(
                 repo_name=repo.name,
@@ -192,11 +209,20 @@ class WorkerTests(unittest.TestCase):
                     CommandResult(
                         ["codex", "exec"],
                         0,
-                        '{"status":"done","summary":"ok","tests":[],"questions":[],"risks":[],"pr_url":"","decision_log":[]}',
+                        "\n".join(
+                            [
+                                '{"type":"thread.started","thread_id":"019ed932-fe5d-7391-b856-98b2239a6380"}',
+                                '{"status":"done","summary":"ok","tests":[],"questions":[],"risks":[],"pr_url":"","decision_log":[]}',
+                            ]
+                        ),
                         "",
                     ),
-                    CommandResult(["git", "push"], 0, "", ""),
-                    CommandResult(["gh", "pr", "create"], 1, "", "network denied"),
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"blocked","summary":"network denied","tests":[],"questions":["need GitHub access"],"risks":[],"pr_url":"","decision_log":[]}',
+                        "",
+                    ),
                 ]
             )
 
@@ -213,7 +239,9 @@ class WorkerTests(unittest.TestCase):
 
             self.assertEqual(run["state"], "blocked")
             self.assertEqual(run["pr_url"], "")
-            self.assertEqual(run["last_error"], "gh pr create failed")
+            self.assertEqual(run["last_error"], "network denied")
+            self.assertEqual(len(runner.calls), 4)
+            self.assertIn("resume", runner.calls[3].argv)
 
     def test_worker_records_codex_thread_id_and_resume_log(self):
         with tempfile.TemporaryDirectory() as tmp:
