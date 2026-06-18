@@ -92,6 +92,6 @@
 
 - [x] Add package metadata and docs.
 - [x] Run the complete test suite.
-- [ ] Initialize local git repository and commit.
-- [ ] Create private GitHub repository.
-- [ ] Push `main`.
+- [x] Initialize local git repository and commit.
+- [x] Create private GitHub repository.
+- [x] Push `main`.
