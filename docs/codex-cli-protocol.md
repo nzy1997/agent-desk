@@ -19,6 +19,12 @@ Agent Desk uses `codex exec resume` for PR review follow-up and closeout. The
 manager supplies a generic prompt and records logs; the resumed Codex thread
 decides the repository-specific steps.
 
+`Request changes` uses the normal `workspace-write` sandbox. `Approve & finish`
+uses each repository's `closeout_sandbox` setting, defaulting to
+`workspace-write`. Repositories that expect Codex to sync the base checkout,
+merge, push, update issues, and remove worktrees after human approval can set
+`closeout_sandbox = "danger-full-access"`.
+
 ## Standing Answer Policy
 
 Every worker prompt includes these rules:

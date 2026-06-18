@@ -21,3 +21,4 @@ test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
 # PR creation is enabled for the Superpowers-to-PR flow.
 mutate_github = true
 push_pr = true
+closeout_sandbox = "danger-full-access"

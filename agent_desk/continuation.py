@@ -31,7 +31,14 @@ class ContinuationRunner:
         run = self.store.get_run(run_id)
         repo = self._repo_for_run(run)
         prompt = render_approve_finish_prompt(run, ready_label=repo.ready_label)
-        return self._resume(run_id, "approve-finish", prompt, success_state="done", success_stage="finished")
+        return self._resume(
+            run_id,
+            "approve-finish",
+            prompt,
+            success_state="done",
+            success_stage="finished",
+            sandbox=repo.closeout_sandbox,
+        )
 
     def _repo_for_run(self, run: dict[str, Any]) -> RepoConfig:
         for repo in self.config.repos:
@@ -47,6 +54,7 @@ class ContinuationRunner:
         *,
         success_state: str,
         success_stage: str,
+        sandbox: str = "workspace-write",
     ) -> ContinuationResult:
         run = self.store.get_run(run_id)
         worktree_raw = str(run.get("worktree_path") or "")
@@ -70,7 +78,7 @@ class ContinuationRunner:
             "--ask-for-approval",
             "never",
             "--sandbox",
-            "workspace-write",
+            sandbox,
             "-C",
             str(worktree_path),
             "exec",

@@ -18,6 +18,7 @@ class RepoConfig:
     test_command: str = ""
     mutate_github: bool = False
     push_pr: bool = False
+    closeout_sandbox: str = "workspace-write"
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ def load_config(path: str | Path) -> AgentDeskConfig:
                 test_command=repo_raw.get("test_command", ""),
                 mutate_github=bool(repo_raw.get("mutate_github", False)),
                 push_pr=bool(repo_raw.get("push_pr", False)),
+                closeout_sandbox=repo_raw.get("closeout_sandbox", "workspace-write"),
             )
         )
     return AgentDeskConfig(
@@ -96,4 +98,5 @@ test_command = "python -m unittest"
 # Keep both false until you are comfortable with the loop.
 mutate_github = false
 push_pr = false
+closeout_sandbox = "workspace-write"
 """

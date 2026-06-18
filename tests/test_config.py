@@ -21,6 +21,7 @@ name = "octo/example"
 local_path = "target"
 base_branch = "main"
 test_command = "python -m unittest"
+closeout_sandbox = "danger-full-access"
 """.strip(),
                 encoding="utf-8",
             )
@@ -37,6 +38,7 @@ test_command = "python -m unittest"
         self.assertEqual(repo.ready_label, "agent:ready")
         self.assertEqual(repo.running_label, "agent:running")
         self.assertEqual(repo.test_command, "python -m unittest")
+        self.assertEqual(repo.closeout_sandbox, "danger-full-access")
 
 
 if __name__ == "__main__":

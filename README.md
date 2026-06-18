@@ -77,6 +77,7 @@ The generated config sets:
 ```toml
 mutate_github = false
 push_pr = false
+closeout_sandbox = "workspace-write"
 ```
 
 With those defaults, Agent Desk reads GitHub issues and runs local workers, but it does not change labels or open PRs. Flip them only after the local loop behaves the way you want.
@@ -91,6 +92,11 @@ worker finishes the implementation but cannot create the PR from inside its own
 environment, it should return `done` with an empty `pr_url`; the manager then
 runs `git push` and `gh pr create` locally. Runs are marked `pr_open` only after
 the manager receives a PR URL.
+
+`closeout_sandbox` controls only the `Approve & finish` Codex resume. Keep the
+default `workspace-write` for conservative local experiments. Set it to
+`danger-full-access` for repositories where approved closeout should let Codex
+sync the base checkout, merge, push, update issues, and remove worktrees.
 
 See `docs/codex-cli-protocol.md` for the full fixed Codex CLI interaction policy.
 
