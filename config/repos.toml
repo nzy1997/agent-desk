@@ -1,0 +1,22 @@
+[agent_desk]
+data_dir = ".agent-desk"
+poll_interval_seconds = 60
+max_concurrent_runs = 3
+dashboard_host = "127.0.0.1"
+dashboard_port = 8765
+worker_timeout_seconds = 7200
+
+[[repos]]
+name = "nzy1997/Suslin.jl"
+local_path = "/Users/nzy/jcode/Suslin.jl"
+base_branch = "main"
+ready_label = "agent:ready"
+running_label = "agent:running"
+pr_open_label = "agent:pr-open"
+blocked_label = "agent:blocked"
+needs_review_label = "agent:needs-human-review"
+test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
+
+# Keep these false for the first real dry runs.
+mutate_github = false
+push_pr = false

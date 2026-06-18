@@ -95,3 +95,23 @@
 - [x] Initialize local git repository and commit.
 - [x] Create private GitHub repository.
 - [x] Push `main`.
+
+### Task 5: Suslin.jl Configuration And Concurrent Scheduling
+
+**Files:**
+- Create: `config/repos.toml`
+- Modify: `agent_desk/scheduler.py`
+- Modify: `README.md`
+- Test: `tests/test_scheduler.py`
+
+**Interfaces:**
+- Produces: `Scheduler.run_available() -> list[RunNextResult]`
+- Produces: round-robin scheduling across configured repositories
+
+- [x] Write a failing test for filling `max_concurrent_runs` across repositories without overfill.
+- [x] Write a failing test expectation that repositories are scheduled round-robin.
+- [x] Implement `run_available()`.
+- [x] Mark claimed runs as `running` before worker threads start.
+- [x] Implement round-robin repository selection.
+- [x] Add local `nzy1997/Suslin.jl` configuration with `max_concurrent_runs = 3`.
+- [x] Document multiple repository and concurrency behavior.

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import threading
-import time
 
 from .config import AgentDeskConfig, RepoConfig
 from .github_client import GitHubClient
@@ -32,6 +31,7 @@ class Scheduler:
         self._paused = False
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._next_repo_index = 0
 
     @property
     def paused(self) -> bool:
@@ -50,10 +50,22 @@ class Scheduler:
         while not self._stop.is_set():
             if not self._paused:
                 try:
-                    self.run_next()
+                    self.run_available()
                 except Exception:
                     pass
             self._stop.wait(self.config.poll_interval_seconds)
+
+    def run_available(self) -> list[RunNextResult]:
+        results: list[RunNextResult] = []
+        with self._lock:
+            if self._paused:
+                return []
+            while self._active_count() < self.config.max_concurrent_runs:
+                result = self._run_next_unlocked()
+                if not result.started:
+                    break
+                results.append(result)
+        return results
 
     def run_next(self) -> RunNextResult:
         with self._lock:
@@ -61,10 +73,19 @@ class Scheduler:
                 return RunNextResult(False, "Scheduler is paused")
             if self._active_count() >= self.config.max_concurrent_runs:
                 return RunNextResult(False, "Max concurrent runs reached")
-            for repo in self.config.repos:
-                issue = self._next_issue(repo)
-                if issue:
-                    return self._start_issue(repo, issue)
+            return self._run_next_unlocked()
+
+    def _run_next_unlocked(self) -> RunNextResult:
+        repos = self.config.repos
+        if not repos:
+            return RunNextResult(False, "No repositories configured")
+        for offset in range(len(repos)):
+            repo_index = (self._next_repo_index + offset) % len(repos)
+            repo = repos[repo_index]
+            issue = self._next_issue(repo)
+            if issue:
+                self._next_repo_index = (repo_index + 1) % len(repos)
+                return self._start_issue(repo, issue)
         return RunNextResult(False, "No agent:ready issues found")
 
     def _active_count(self) -> int:
@@ -89,6 +110,7 @@ class Scheduler:
             branch_name=branch,
         )
         self.store.add_event(run_id, "info", "claim", "Claimed issue", {"repo": repo.name})
+        self.store.update_run(run_id, state="running", stage="claimed")
         if repo.mutate_github:
             self.github.add_label(repo.name, issue_number, repo.running_label)
             self.github.remove_label(repo.name, issue_number, repo.ready_label)

@@ -12,7 +12,8 @@ This MVP uses only the Python standard library plus local command-line tools:
 ## MVP Scope
 
 - Scan configured repositories for `agent:ready` issues.
-- Start one worker at a time by default.
+- Start up to `max_concurrent_runs` workers at once.
+- Support multiple configured repositories with round-robin scheduling.
 - Create a Git worktree and branch for each run.
 - Run `codex exec` non-interactively with a structured result contract.
 - Save `prompt.md`, `stdout.jsonl`, `stderr.log`, `result.json`, and command logs per run.
@@ -38,6 +39,31 @@ Run one issue manually:
 ```bash
 python3 -m agent_desk run-next --config config/repos.toml
 ```
+
+## Multiple Repositories And Concurrency
+
+Add one `[[repos]]` block per repository:
+
+```toml
+[agent_desk]
+max_concurrent_runs = 3
+
+[[repos]]
+name = "OWNER/FIRST"
+local_path = "/absolute/path/to/first"
+base_branch = "main"
+test_command = "python -m unittest"
+
+[[repos]]
+name = "OWNER/SECOND"
+local_path = "/absolute/path/to/second"
+base_branch = "main"
+test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
+```
+
+The concurrency limit is global. If it is set to `3`, Agent Desk can run three Codex CLI workers at the same time across all repositories. Scheduling is round-robin across repositories so one busy repository does not monopolize every slot.
+
+Start low. Each active issue means one `codex exec` process plus whatever tests that worker runs.
 
 ## Safety Defaults
 
