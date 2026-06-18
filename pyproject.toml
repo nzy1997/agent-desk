@@ -1,0 +1,13 @@
+[project]
+name = "agent-desk"
+version = "0.1.0"
+description = "Local desktop issue-to-Codex worker orchestration."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+agent-desk = "agent_desk.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

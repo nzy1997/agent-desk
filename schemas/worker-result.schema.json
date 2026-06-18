@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "tests", "questions", "risks"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["done", "blocked", "failed"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "tests": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "questions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
