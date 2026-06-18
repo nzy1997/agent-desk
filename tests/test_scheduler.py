@@ -59,6 +59,31 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(issues_by_run_order, [1, 3, 2])
             self.assertEqual(scheduler.run_available(), [])
 
+    def test_retry_uses_unique_branch_name_after_failed_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(1, state="failed", stage="failed")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                max_concurrent_runs=1,
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=FakeGitHub())
+
+            result = scheduler.run_next()
+            run = store.get_run(result.run_id)
+
+            self.assertTrue(result.started)
+            self.assertEqual(run["branch_name"], "agent/issue-1-first-run-2")
+
 
 if __name__ == "__main__":
     unittest.main()

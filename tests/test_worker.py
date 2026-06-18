@@ -48,12 +48,10 @@ class WorkerTests(unittest.TestCase):
             )
 
             codex_call = runner.calls[2]
-            self.assertEqual(codex_call.argv[:2], ["codex", "exec"])
+            self.assertEqual(codex_call.argv[:4], ["codex", "--ask-for-approval", "never", "exec"])
             self.assertIn("--json", codex_call.argv)
             self.assertIn("--sandbox", codex_call.argv)
             self.assertIn("workspace-write", codex_call.argv)
-            self.assertIn("--ask-for-approval", codex_call.argv)
-            self.assertIn("never", codex_call.argv)
             self.assertEqual(result.status, "done")
             self.assertTrue((config.data_dir / "runs" / "issue-7" / "run-1" / "prompt.md").exists())
             self.assertTrue((config.data_dir / "runs" / "issue-7" / "run-1" / "stdout.jsonl").exists())

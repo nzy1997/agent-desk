@@ -101,7 +101,8 @@ class Scheduler:
     def _start_issue(self, repo: RepoConfig, issue: dict) -> RunNextResult:
         issue_number = int(issue["number"])
         title = str(issue.get("title") or f"Issue {issue_number}")
-        branch = f"agent/issue-{issue_number}-{slugify(title)[:48]}"
+        attempt = self.store.next_attempt(repo.name, issue_number)
+        branch = f"agent/issue-{issue_number}-{slugify(title)[:48]}-run-{attempt}"
         run_id = self.store.create_run(
             repo_name=repo.name,
             issue_number=issue_number,

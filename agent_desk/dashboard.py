@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .scheduler import Scheduler
 from .store import Store
@@ -13,9 +13,35 @@ from .store import Store
 
 def build_state_payload(store: Store, scheduler: Scheduler | None = None) -> dict[str, Any]:
     payload = store.dashboard_state()
+    for run in payload["runs"]:
+        run["log_files"] = available_log_files(Path(run.get("run_dir") or ""))
     payload["app"] = "Agent Desk"
     payload["scheduler"] = {"paused": scheduler.paused if scheduler else False}
     return payload
+
+
+LOG_FILE_ORDER = [
+    "prompt.md",
+    "stderr.log",
+    "error.log",
+    "stdout.jsonl",
+    "result.json",
+    "git-fetch.stderr.log",
+    "git-fetch.stdout.log",
+    "git-worktree.stderr.log",
+    "git-worktree.stdout.log",
+    "git-push.stderr.log",
+    "git-push.stdout.log",
+    "gh-pr-create.stderr.log",
+    "gh-pr-create.stdout.log",
+    "pr-body.md",
+]
+
+
+def available_log_files(run_dir: Path) -> list[str]:
+    if not run_dir or not run_dir.exists() or not run_dir.is_dir():
+        return []
+    return [name for name in LOG_FILE_ORDER if (run_dir / name).exists()]
 
 
 def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseHTTPRequestHandler]:
@@ -79,8 +105,9 @@ def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseH
                 return
             run_id = int(parts[3])
             run = store.get_run(run_id)
-            requested = urlparse(self.path).query.split("name=", 1)[-1]
-            allowed = {"prompt.md", "stdout.jsonl", "stderr.log", "result.json", "error.log"}
+            query = parse_qs(urlparse(self.path).query)
+            requested = query.get("name", [""])[0]
+            allowed = set(LOG_FILE_ORDER)
             if requested not in allowed:
                 self.send_error(HTTPStatus.BAD_REQUEST, "file not allowed")
                 return
@@ -182,6 +209,21 @@ HTML = """<!doctype html>
     .state-done, .state-pr_open, .state-needs_review { color: var(--good); }
     .event.error { border-color: #f4b7b0; }
     .event.warning { border-color: #f7c46c; }
+    .log-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .log-links a {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 3px 6px;
+      text-decoration: none;
+      color: var(--accent);
+      background: #fff;
+      font-size: 12px;
+    }
     pre {
       white-space: pre-wrap;
       word-break: break-word;
@@ -234,6 +276,15 @@ HTML = """<!doctype html>
     function esc(value) {
       return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
+    function logLinks(run) {
+      const files = run.log_files || [];
+      if (!files.length) return '';
+      const links = files.map(name => {
+        const href = `/api/run/${run.id}/file?name=${encodeURIComponent(name)}`;
+        return `<a href="${href}" target="_blank" rel="noopener">${esc(name)}</a>`;
+      }).join('');
+      return `<div class="log-links">${links}</div>`;
+    }
     function runHtml(run) {
       return `<div class="run">
         <strong>#${run.issue_number} ${esc(run.issue_title)}</strong>
@@ -241,6 +292,7 @@ HTML = """<!doctype html>
         <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
         <div>Stage: ${esc(run.stage)}</div>
         ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
+        ${logLinks(run)}
       </div>`;
     }
     async function refresh() {

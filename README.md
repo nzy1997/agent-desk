@@ -17,7 +17,7 @@ This MVP uses only the Python standard library plus local command-line tools:
 - Create a Git worktree and branch for each run.
 - Run `codex exec` non-interactively with the fixed Superpowers-to-PR protocol.
 - Save `prompt.md`, `stdout.jsonl`, `stderr.log`, `result.json`, and command logs per run.
-- Serve a local dashboard at `http://127.0.0.1:8765`.
+- Serve a local dashboard at `http://127.0.0.1:8765` with per-run log links.
 - Keep GitHub mutation and PR creation disabled until configured.
 
 ## Quick Start
@@ -82,6 +82,16 @@ With those defaults, Agent Desk reads GitHub issues and runs local workers, but 
 - `push_pr = false`: choose `Keep the branch as-is`.
 
 See `docs/codex-cli-protocol.md` for the full fixed Codex CLI interaction policy.
+
+## Inspecting Failures
+
+Failed runs expose links in the dashboard for files such as `error.log`, `stderr.log`, `stdout.jsonl`, and `prompt.md`.
+
+The files also live under the configured data directory:
+
+```text
+.agent-desk/runs/issue-ISSUE_NUMBER/run-ATTEMPT/
+```
 
 ## Tests
 

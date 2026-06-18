@@ -140,3 +140,29 @@
 - [x] Implement the fixed prompt policy.
 - [x] Extend worker result parsing and schema.
 - [x] Document the Codex CLI protocol.
+
+### Task 7: Worker Failure Visibility And Retry Hygiene
+
+**Files:**
+- Modify: `agent_desk/worker.py`
+- Modify: `agent_desk/dashboard.py`
+- Modify: `agent_desk/scheduler.py`
+- Modify: `tests/test_worker.py`
+- Modify: `tests/test_dashboard.py`
+- Modify: `tests/test_scheduler.py`
+- Modify: `README.md`
+
+**Interfaces:**
+- Produces: Codex approval policy passed as a global CLI flag before `exec`
+- Produces: dashboard `log_files` metadata per run
+- Produces: per-run log links in the dashboard
+- Produces: retry branch names with run attempt suffixes
+
+- [x] Reproduce the `codex exec --ask-for-approval` argument parsing failure.
+- [x] Write a failing test for Codex CLI argument order.
+- [x] Write a failing test for dashboard log file exposure.
+- [x] Write a failing test for dashboard log links.
+- [x] Write a failing test for retry branch uniqueness after failed runs.
+- [x] Move `--ask-for-approval never` before the `exec` subcommand.
+- [x] Add dashboard log metadata and UI links.
+- [x] Add attempt suffixes to generated branch names.

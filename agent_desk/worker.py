@@ -165,12 +165,12 @@ class Worker:
         result_path = run_dir / "result.json"
         argv = [
             "codex",
+            "--ask-for-approval",
+            "never",
             "exec",
             "--json",
             "--sandbox",
             "workspace-write",
-            "--ask-for-approval",
-            "never",
             "-C",
             str(worktree_path),
         ]
