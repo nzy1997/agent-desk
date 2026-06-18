@@ -4,7 +4,7 @@ from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
 from agent_desk.store import Store
-from agent_desk.worker import CommandResult, FakeCommandRunner, Worker
+from agent_desk.worker import CommandResult, FakeCommandRunner, Worker, extract_thread_id
 
 
 class WorkerTests(unittest.TestCase):
@@ -205,6 +205,75 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(run["state"], "blocked")
             self.assertEqual(run["pr_url"], "")
             self.assertEqual(run["last_error"], "gh pr create failed")
+
+    def test_worker_records_codex_thread_id_and_resume_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_path = root / "repo"
+            repo_path.mkdir()
+            config = AgentDeskConfig(data_dir=root / "data")
+            repo = RepoConfig(
+                name="octo/example",
+                local_path=repo_path,
+                base_branch="main",
+                test_command="python -m unittest",
+                push_pr=False,
+            )
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name=repo.name,
+                issue_number=11,
+                issue_title="Resume me",
+                issue_url="https://github.com/octo/example/issues/11",
+                branch_name="agent/issue-11-resume-me",
+            )
+            thread_id = "019ed932-fe5d-7391-b856-98b2239a6380"
+            runner = FakeCommandRunner(
+                results=[
+                    CommandResult(["git", "fetch"], 0, "", ""),
+                    CommandResult(["git", "worktree"], 0, "", ""),
+                    CommandResult(
+                        ["codex", "exec"],
+                        0,
+                        "\n".join(
+                            [
+                                f'{{"type":"thread.started","thread_id":"{thread_id}"}}',
+                                '{"type":"turn.started"}',
+                                '{"status":"done","summary":"ok","tests":[],"questions":[],"risks":[],"pr_url":"","decision_log":[]}',
+                            ]
+                        ),
+                        "",
+                    ),
+                ]
+            )
+
+            result = Worker(config, store, runner).run_issue(
+                run_id=run_id,
+                repo=repo,
+                issue_number=11,
+                issue_title="Resume me",
+                issue_body="Body",
+                issue_url="https://github.com/octo/example/issues/11",
+                branch_name="agent/issue-11-resume-me",
+            )
+            run = store.get_run(run_id)
+            resume_log = config.data_dir / "runs" / "issue-11" / "run-1" / "codex-resume.txt"
+
+            self.assertEqual(result.status, "done")
+            self.assertEqual(run["codex_thread_id"], thread_id)
+            self.assertIn(thread_id, resume_log.read_text(encoding="utf-8"))
+            self.assertIn("codex resume --include-non-interactive", resume_log.read_text(encoding="utf-8"))
+
+    def test_extract_thread_id_ignores_non_thread_events(self):
+        stdout = "\n".join(
+            [
+                '{"type":"turn.started"}',
+                '{"not json"',
+                '{"type":"thread.started","thread_id":"019ed932-fe5d-7391-b856-98b2239a6380"}',
+            ]
+        )
+
+        self.assertEqual(extract_thread_id(stdout), "019ed932-fe5d-7391-b856-98b2239a6380")
 
 
 if __name__ == "__main__":

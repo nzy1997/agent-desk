@@ -47,6 +47,7 @@ class Store:
                     attempt integer not null default 1,
                     run_dir text not null default '',
                     worktree_path text not null default '',
+                    codex_thread_id text not null default '',
                     pr_url text not null default '',
                     last_error text not null default '',
                     created_at text not null,
@@ -75,6 +76,7 @@ class Store:
                 """
             )
             self._ensure_column(conn, "runs", "run_dir", "text not null default ''")
+            self._ensure_column(conn, "runs", "codex_thread_id", "text not null default ''")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}

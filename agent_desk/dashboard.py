@@ -5,16 +5,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .scheduler import Scheduler
 from .store import Store
+from .worker import extract_thread_id, format_resume_command
 
 
 def build_state_payload(store: Store, scheduler: Scheduler | None = None) -> dict[str, Any]:
     payload = store.dashboard_state()
     for run in payload["runs"]:
-        run["log_files"] = available_log_files(Path(run.get("run_dir") or ""))
+        run_dir = Path(run.get("run_dir") or "")
+        run["log_files"] = available_log_files(run_dir)
+        thread_id = run.get("codex_thread_id") or extract_thread_id_from_run_dir(run_dir)
+        run["codex_thread_id"] = thread_id
+        run["resume_command"] = format_resume_command(thread_id, str(run.get("worktree_path") or ""))
     payload["app"] = "Agent Desk"
     payload["scheduler"] = {"paused": scheduler.paused if scheduler else False}
     return payload
@@ -25,6 +30,7 @@ LOG_FILE_ORDER = [
     "stderr.log",
     "error.log",
     "stdout.jsonl",
+    "codex-resume.txt",
     "result.json",
     "git-fetch.stderr.log",
     "git-fetch.stdout.log",
@@ -42,6 +48,15 @@ def available_log_files(run_dir: Path) -> list[str]:
     if not run_dir or not run_dir.exists() or not run_dir.is_dir():
         return []
     return [name for name in LOG_FILE_ORDER if (run_dir / name).exists()]
+
+
+def extract_thread_id_from_run_dir(run_dir: Path) -> str:
+    if not run_dir or not run_dir.exists() or not run_dir.is_dir():
+        return ""
+    stdout_path = run_dir / "stdout.jsonl"
+    if not stdout_path.exists():
+        return ""
+    return extract_thread_id(stdout_path.read_text(encoding="utf-8", errors="replace"))
 
 
 def make_handler(store: Store, scheduler: Scheduler | None = None) -> type[BaseHTTPRequestHandler]:
@@ -224,6 +239,26 @@ HTML = """<!doctype html>
       background: #fff;
       font-size: 12px;
     }
+    .resume-command {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: center;
+      margin-top: 8px;
+    }
+    .resume-command code {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 6px;
+      background: #f8fafc;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+      font-size: 12px;
+    }
+    .resume-command button {
+      padding: 5px 8px;
+      font-size: 12px;
+    }
     pre {
       white-space: pre-wrap;
       word-break: break-word;
@@ -276,6 +311,12 @@ HTML = """<!doctype html>
     function esc(value) {
       return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
+    function jsString(value) {
+      return JSON.stringify(String(value ?? '')).replace(/</g, '\\u003c');
+    }
+    async function copyResume(command) {
+      await navigator.clipboard.writeText(command);
+    }
     function logLinks(run) {
       const files = run.log_files || [];
       if (!files.length) return '';
@@ -285,6 +326,11 @@ HTML = """<!doctype html>
       }).join('');
       return `<div class="log-links">${links}</div>`;
     }
+    function resumeCommand(run) {
+      const command = run.resume_command || '';
+      if (!command) return '';
+      return `<div class="resume-command"><code>${esc(command)}</code><button onclick="copyResume(${jsString(command)})">Copy</button></div>`;
+    }
     function runHtml(run) {
       return `<div class="run">
         <strong>#${run.issue_number} ${esc(run.issue_title)}</strong>
@@ -292,6 +338,7 @@ HTML = """<!doctype html>
         <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
         <div>Stage: ${esc(run.stage)}</div>
         ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
+        ${resumeCommand(run)}
         ${logLinks(run)}
       </div>`;
     }

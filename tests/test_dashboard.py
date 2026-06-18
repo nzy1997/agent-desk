@@ -53,6 +53,70 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("logLinks(run)", HTML)
         self.assertIn("/api/run/${run.id}/file?name=", HTML)
 
+    def test_state_payload_includes_resume_command_from_stored_thread_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree_path = root / "worktrees" / "repo with spaces"
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Add dashboard",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-add-dashboard",
+            )
+            store.update_run(
+                run_id,
+                state="blocked",
+                stage="blocked",
+                worktree_path=str(worktree_path),
+                codex_thread_id="019ed932-fe5d-7391-b856-98b2239a6380",
+            )
+
+            payload = build_state_payload(store)
+            run = payload["runs"][0]
+
+        self.assertEqual(run["codex_thread_id"], "019ed932-fe5d-7391-b856-98b2239a6380")
+        self.assertIn("codex resume --include-non-interactive", run["resume_command"])
+        self.assertIn("019ed932-fe5d-7391-b856-98b2239a6380", run["resume_command"])
+        self.assertIn(f"'{worktree_path}'", run["resume_command"])
+
+    def test_state_payload_backfills_resume_command_from_stdout_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "issue-5" / "run-1"
+            worktree_path = root / "worktree"
+            run_dir.mkdir(parents=True)
+            (run_dir / "stdout.jsonl").write_text(
+                '{"type":"thread.started","thread_id":"019ed932-fe5d-7391-b856-98b2239a6380"}\n',
+                encoding="utf-8",
+            )
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Add dashboard",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-add-dashboard",
+            )
+            store.update_run(
+                run_id,
+                state="blocked",
+                stage="blocked",
+                run_dir=str(run_dir),
+                worktree_path=str(worktree_path),
+            )
+
+            payload = build_state_payload(store)
+            run = payload["runs"][0]
+
+        self.assertEqual(run["codex_thread_id"], "019ed932-fe5d-7391-b856-98b2239a6380")
+        self.assertIn("codex resume --include-non-interactive", run["resume_command"])
+
+    def test_dashboard_html_renders_resume_command(self):
+        self.assertIn("resumeCommand(run)", HTML)
+        self.assertIn("navigator.clipboard.writeText(command)", HTML)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from typing import Any
 
@@ -188,6 +189,11 @@ class Worker:
         if codex.returncode != 0:
             return self._fail(run_id, run_dir, "failed", "codex exec failed", codex.stderr)
 
+        thread_id = extract_thread_id(codex.stdout)
+        if thread_id:
+            self.store.update_run(run_id, codex_thread_id=thread_id)
+            self._write_resume_log(run_dir, thread_id, worktree_path)
+
         payload = self._parse_worker_result(result_path, codex.stdout)
         status = str(payload.get("status", "failed"))
         result = WorkerResult(
@@ -292,6 +298,15 @@ class Worker:
         self.store.update_run(run_id, state="blocked", stage="blocked", last_error=summary)
         self.store.add_event(run_id, "error", "pr", summary, {"detail": detail[-4000:]})
 
+    def _write_resume_log(self, run_dir: Path, thread_id: str, worktree_path: Path) -> None:
+        command = format_resume_command(thread_id, str(worktree_path))
+        if not command:
+            return
+        (run_dir / "codex-resume.txt").write_text(
+            f"thread_id: {thread_id}\nworktree: {worktree_path}\n\n{command}\n",
+            encoding="utf-8",
+        )
+
     def _fail(self, run_id: int, run_dir: Path, state: str, summary: str, detail: str) -> WorkerResult:
         (run_dir / "error.log").write_text(detail, encoding="utf-8")
         self.store.update_run(run_id, state=state, stage=state, last_error=summary)
@@ -305,7 +320,7 @@ class Worker:
         candidates.extend(line for line in stdout.splitlines() if line.strip())
         for candidate in candidates:
             parsed = parse_json_object(candidate)
-            if parsed:
+            if parsed and "status" in parsed:
                 return parsed
         return {
             "status": "failed",
@@ -334,6 +349,34 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def extract_thread_id(stdout: str) -> str:
+    for line in stdout.splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") == "thread.started" and isinstance(payload.get("thread_id"), str):
+            return payload["thread_id"]
+    return ""
+
+
+def format_resume_command(thread_id: str, worktree_path: str) -> str:
+    if not thread_id or not worktree_path:
+        return ""
+    return " ".join(
+        [
+            "codex",
+            "resume",
+            "--include-non-interactive",
+            "-C",
+            shlex.quote(worktree_path),
+            shlex.quote(thread_id),
+        ]
+    )
 
 
 def slugify(value: str) -> str:

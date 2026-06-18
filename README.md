@@ -16,8 +16,8 @@ This MVP uses only the Python standard library plus local command-line tools:
 - Support multiple configured repositories with round-robin scheduling.
 - Create a Git worktree and branch for each run.
 - Run `codex exec` non-interactively with the fixed Superpowers-to-PR protocol.
-- Save `prompt.md`, `stdout.jsonl`, `stderr.log`, `result.json`, and command logs per run.
-- Serve a local dashboard at `http://127.0.0.1:8765` with per-run log links.
+- Save `prompt.md`, `stdout.jsonl`, `stderr.log`, `result.json`, `codex-resume.txt`, and command logs per run.
+- Serve a local dashboard at `http://127.0.0.1:8765` with per-run log links and Codex resume commands.
 - Keep GitHub mutation and PR creation disabled until configured.
 
 ## Quick Start
@@ -98,6 +98,25 @@ The files also live under the configured data directory:
 ```text
 .agent-desk/runs/issue-ISSUE_NUMBER/run-ATTEMPT/
 ```
+
+## Human Intervention
+
+Agent Desk records the Codex CLI `thread_id` from `stdout.jsonl` and stores a
+ready-to-copy resume command on each run. The same command is written to
+`codex-resume.txt` when the thread id is available:
+
+```bash
+codex resume --include-non-interactive -C /path/to/worktree THREAD_ID
+```
+
+Use that command when a human wants to continue the worker conversation in an
+interactive Codex CLI session. Agent Desk keeps the run worktree path in SQLite
+and shows the command in the dashboard; old runs without `codex_thread_id` in
+SQLite are backfilled from `stdout.jsonl` for display.
+
+Do not remove a run worktree while it may still need human intervention. Cleanup
+should happen after the related PR has been merged or closed and the issue has
+been resolved.
 
 ## Tests
 

@@ -2,6 +2,19 @@
 
 Agent Desk runs Codex CLI as a non-interactive worker. The worker should follow the same Superpowers flow the human owner already uses manually, with Agent Desk supplying standing answers for repetitive prompts.
 
+Agent Desk captures the full `codex exec --json` stream in `stdout.jsonl`. The
+first `thread.started` event contains the Codex CLI `thread_id`; Agent Desk
+stores that id on the run and writes `codex-resume.txt` with the command a human
+can use to reopen the same conversation:
+
+```bash
+codex resume --include-non-interactive -C /path/to/worktree THREAD_ID
+```
+
+For automation-to-automation continuation, use `codex exec resume THREAD_ID
+"prompt"`. For human intervention, prefer the interactive `codex resume`
+command shown in the dashboard.
+
 ## Standing Answer Policy
 
 Every worker prompt includes these rules:
@@ -55,3 +68,9 @@ When `pr_url` is empty and `status` is `done` with `push_pr = true`, Agent Desk
 attempts to open the PR itself. The run is marked `pr_open` only if the manager
 gets a PR URL back; failed push or PR creation leaves the run `blocked` with the
 command logs attached to the run directory.
+
+## Worktree Retention
+
+The worktree is part of the resume context. Agent Desk should not remove it
+while a run is blocked, failed, awaiting review, or attached to an open PR.
+Cleanup belongs after the PR is merged or closed and the issue is resolved.
