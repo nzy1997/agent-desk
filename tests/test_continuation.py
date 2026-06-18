@@ -95,6 +95,37 @@ class ContinuationTests(unittest.TestCase):
             self.assertEqual(run["state"], "done")
             self.assertEqual(run["stage"], "finished")
 
+    def test_approve_finish_backfills_thread_id_from_historical_stdout_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, worktree = self._store_with_pr_run(root)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "stdout.jsonl").write_text(
+                '{"type":"thread.started","thread_id":"019ed932-fe5d-7391-b856-98b2239a6380"}\n',
+                encoding="utf-8",
+            )
+            store.update_run(run_id, codex_thread_id="")
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"merged and cleaned up","tests":[],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/9","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+
+            result = ContinuationRunner(config, store, runner).approve_finish(run_id)
+            call = runner.calls[0]
+            run = store.get_run(run_id)
+
+            self.assertTrue(result.ok)
+            self.assertEqual(call.cwd, worktree)
+            self.assertIn("019ed932-fe5d-7391-b856-98b2239a6380", call.argv)
+            self.assertEqual(run["codex_thread_id"], "019ed932-fe5d-7391-b856-98b2239a6380")
+
     def test_approve_finish_blocks_when_codex_reports_pending_checks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

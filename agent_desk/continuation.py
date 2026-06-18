@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import AgentDeskConfig, RepoConfig
 from .store import Store
-from .worker import CommandRunner, parse_json_object
+from .worker import CommandRunner, extract_thread_id, parse_json_object
 
 
 @dataclass(frozen=True)
@@ -49,12 +49,12 @@ class ContinuationRunner:
         success_stage: str,
     ) -> ContinuationResult:
         run = self.store.get_run(run_id)
-        thread_id = str(run.get("codex_thread_id") or "")
         worktree_raw = str(run.get("worktree_path") or "")
         worktree_path = Path(worktree_raw)
         run_dir_raw = str(run.get("run_dir") or "")
         run_dir = Path(run_dir_raw) if run_dir_raw else self.config.data_dir / "runs" / f"issue-{run['issue_number']}" / f"run-{run['attempt']}"
         run_dir.mkdir(parents=True, exist_ok=True)
+        thread_id = self._thread_id_for_run(run_id, run, run_dir)
         if not thread_id:
             return self._block(run_id, f"{action} requires codex_thread_id")
         if not worktree_raw:
@@ -111,6 +111,18 @@ class ContinuationRunner:
         self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
         self.store.add_event(run_id, "error", "continuation", message, {})
         return ContinuationResult(False, message, run_id)
+
+    def _thread_id_for_run(self, run_id: int, run: dict[str, Any], run_dir: Path) -> str:
+        thread_id = str(run.get("codex_thread_id") or "")
+        if thread_id:
+            return thread_id
+        stdout_path = run_dir / "stdout.jsonl"
+        if not stdout_path.exists():
+            return ""
+        thread_id = extract_thread_id(stdout_path.read_text(encoding="utf-8", errors="replace"))
+        if thread_id:
+            self.store.update_run(run_id, codex_thread_id=thread_id)
+        return thread_id
 
 
 def parse_resume_result(result_path: Path, stdout: str) -> dict[str, Any]:
