@@ -29,6 +29,29 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(payload["app"], "Agent Desk")
         self.assertEqual(payload["runs"][0]["issue_number"], 5)
 
+    def test_state_payload_includes_runtime_scheduler_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                max_concurrent_runs=3,
+                repos=[RepoConfig(name="octo/example", local_path=root / "example")],
+            )
+            scheduler = Scheduler(config, store)
+
+            payload = build_state_payload(store, scheduler)
+
+        self.assertEqual(
+            payload["scheduler"]["settings"],
+            {
+                "auto_start_ready": False,
+                "max_concurrent_runs": 3,
+                "requires_human_review": True,
+                "single_closeout_per_workspace": True,
+            },
+        )
+
     def test_state_payload_lists_existing_run_log_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -125,6 +148,40 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("/api/run/${run.id}/approve-finish", HTML)
         self.assertIn("Approve & finish", HTML)
 
+    def test_state_payload_includes_pr_ci_status_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Add dashboard",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-add-dashboard",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/example/pull/9",
+                pr_ci_status="pending",
+                pr_ci_summary="1 passed, 1 pending",
+                pr_ci_checked_at="2026-06-18T00:00:00+00:00",
+                ci_fix_attempts=1,
+            )
+
+            run = build_state_payload(store)["runs"][0]
+
+        self.assertEqual(run["pr_ci_status"], "pending")
+        self.assertEqual(run["pr_ci_summary"], "1 passed, 1 pending")
+        self.assertEqual(run["ci_fix_attempts"], 1)
+
+    def test_dashboard_html_renders_pr_ci_status(self):
+        self.assertIn("prStatus(run)", HTML)
+        self.assertIn("CI running", HTML)
+        self.assertIn("CI passed", HTML)
+        self.assertIn("CI failed", HTML)
+
     def test_state_payload_includes_projects_and_run_project_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -157,6 +214,14 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("renderProjectIndex(state)", HTML)
         self.assertIn("selectProjectByPath(this)", HTML)
         self.assertIn("Back to folders", HTML)
+
+    def test_dashboard_html_renders_runtime_settings_controls(self):
+        self.assertIn("/api/settings", HTML)
+        self.assertIn("auto-start-ready", HTML)
+        self.assertIn("max-concurrent-runs", HTML)
+        self.assertIn("requires-human-review", HTML)
+        self.assertIn("single-closeout-per-workspace", HTML)
+        self.assertIn("saveSettings()", HTML)
 
 
 if __name__ == "__main__":

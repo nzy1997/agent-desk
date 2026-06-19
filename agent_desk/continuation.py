@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AgentDeskConfig, RepoConfig
+from .github_client import PullRequestChecksStatus
 from .store import Store
 from .worker import CommandRunner, extract_thread_id, parse_json_object
 
@@ -40,6 +41,19 @@ class ContinuationRunner:
             sandbox=repo.closeout_sandbox,
         )
 
+    def finish_after_ci_success(self, run_id: int) -> ContinuationResult:
+        run = self.store.get_run(run_id)
+        repo = self._repo_for_run(run)
+        prompt = render_finish_after_ci_success_prompt(run, ready_label=repo.ready_label, blocked_label=repo.blocked_label)
+        return self._resume(
+            run_id,
+            "auto-finish",
+            prompt,
+            success_state="done",
+            success_stage="finished",
+            sandbox=repo.closeout_sandbox,
+        )
+
     def open_pull_request(self, run_id: int) -> ContinuationResult:
         run = self.store.get_run(run_id)
         repo = self._repo_for_run(run)
@@ -52,6 +66,24 @@ class ContinuationRunner:
             success_stage="pull request opened",
             sandbox=repo.closeout_sandbox,
             require_pr_url=True,
+        )
+
+    def fix_ci(
+        self,
+        run_id: int,
+        pr_status: PullRequestChecksStatus,
+        *,
+        attempt: int,
+        max_attempts: int,
+    ) -> ContinuationResult:
+        run = self.store.get_run(run_id)
+        prompt = render_fix_ci_prompt(run, pr_status, attempt=attempt, max_attempts=max_attempts)
+        return self._resume(
+            run_id,
+            f"fix-ci-{attempt}",
+            prompt,
+            success_state="pr_open",
+            success_stage="ci fix pushed",
         )
 
     def _repo_for_run(self, run: dict[str, Any]) -> RepoConfig:
@@ -214,8 +246,76 @@ Return JSON with status, summary, tests, questions, risks, pr_url, and decision_
 """
 
 
+def render_fix_ci_prompt(
+    run: dict[str, Any],
+    pr_status: PullRequestChecksStatus,
+    *,
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    return f"""Automatic CI fix attempt {attempt} of {max_attempts} for this Agent Desk pull request.
+
+Repository: {run['repo_name']}
+Issue: #{run['issue_number']} {run['issue_title']}
+Issue URL: {run['issue_url']}
+Pull request: {run.get('pr_url') or '(missing PR URL)'}
+Branch: {run['branch_name']}
+Head SHA: {pr_status.head_sha or '(unknown)'}
+CI summary: {pr_status.summary}
+
+Failing or pending check context:
+{format_check_context(pr_status.checks)}
+
+Continue from the existing Codex thread context. Inspect the failing check logs when links are available, fix the cause with the smallest appropriate change, run relevant verification, and push the updates to the existing PR branch. Do not merge the PR.
+If the CI failure cannot be diagnosed or fixed without human input, return status "blocked" with the exact reason.
+
+Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.
+"""
+
+
+def format_check_context(checks: list[dict[str, Any]]) -> str:
+    if not checks:
+        return "- No check details were returned by GitHub."
+    lines = []
+    for check in checks:
+        name = str(check.get("name") or "(unnamed check)")
+        state = str(check.get("state") or check.get("bucket") or "unknown")
+        description = str(check.get("description") or "").strip()
+        link = str(check.get("link") or "").strip()
+        detail = f"- {name}: {state}"
+        if description:
+            detail += f" - {description}"
+        if link:
+            detail += f" ({link})"
+        lines.append(detail)
+    return "\n".join(lines)
+
+
 def render_approve_finish_prompt(run: dict[str, Any], *, ready_label: str, blocked_label: str) -> str:
     return f"""Human approval has been granted for this Agent Desk pull request.
+
+Repository: {run['repo_name']}
+Issue: #{run['issue_number']} {run['issue_title']}
+Issue URL: {run['issue_url']}
+Pull request: {run.get('pr_url') or '(missing PR URL)'}
+Branch: {run['branch_name']}
+
+Continue from the existing Codex thread context and perform the closeout workflow:
+1. Inspect the pull request status and checks. Do not merge while checks are pending or failing.
+2. If checks are not all successful, return status "blocked" with the concrete reason.
+3. If checks are successful, merge the PR using the repository's normal merge method.
+4. Sync the local base branch with origin.
+5. Remove the local worktree and prune stale worktree metadata when it is safe.
+6. Close or update the completed issue if GitHub did not do it automatically.
+7. Inspect only open issues with the configured blocked label {blocked_label}; these are the standby agent issues. Determine which of those blocked issues are now unblocked and ready for an agent. For each issue that can now be run, add the configured ready label {ready_label} and remove {blocked_label}. Do not add {ready_label} to unlabeled issues, issues without {blocked_label}, or discussions/features that are not explicitly labeled for agent work. Do not start those issues.
+8. Report exactly which PR, worktree, branch, issue, and follow-up issue labels were changed.
+
+Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.
+"""
+
+
+def render_finish_after_ci_success_prompt(run: dict[str, Any], *, ready_label: str, blocked_label: str) -> str:
+    return f"""Human review is disabled for this Agent Desk pull request, and GitHub CI has passed.
 
 Repository: {run['repo_name']}
 Issue: #{run['issue_number']} {run['issue_title']}

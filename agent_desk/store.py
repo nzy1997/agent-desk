@@ -79,6 +79,11 @@ class Store:
             self._ensure_column(conn, "runs", "run_dir", "text not null default ''")
             self._ensure_column(conn, "runs", "issue_body", "text not null default ''")
             self._ensure_column(conn, "runs", "codex_thread_id", "text not null default ''")
+            self._ensure_column(conn, "runs", "pr_ci_status", "text not null default ''")
+            self._ensure_column(conn, "runs", "pr_ci_summary", "text not null default ''")
+            self._ensure_column(conn, "runs", "pr_ci_checked_at", "text not null default ''")
+            self._ensure_column(conn, "runs", "ci_fix_attempts", "integer not null default 0")
+            self._ensure_column(conn, "runs", "ci_fix_last_sha", "text not null default ''")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}

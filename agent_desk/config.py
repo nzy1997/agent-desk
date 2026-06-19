@@ -28,7 +28,7 @@ class RepoConfig:
 class AgentDeskConfig:
     data_dir: Path
     poll_interval_seconds: int = 60
-    max_concurrent_runs: int = 1
+    max_concurrent_runs: int = 3
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
     worker_timeout_seconds: int = 7200
@@ -71,7 +71,7 @@ def load_config(path: str | Path) -> AgentDeskConfig:
     return AgentDeskConfig(
         data_dir=_resolve_path(root, desk_raw.get("data_dir", ".agent-desk")),
         poll_interval_seconds=int(desk_raw.get("poll_interval_seconds", 60)),
-        max_concurrent_runs=int(desk_raw.get("max_concurrent_runs", 1)),
+        max_concurrent_runs=int(desk_raw.get("max_concurrent_runs", 3)),
         dashboard_host=desk_raw.get("dashboard_host", "127.0.0.1"),
         dashboard_port=int(desk_raw.get("dashboard_port", 8765)),
         worker_timeout_seconds=int(desk_raw.get("worker_timeout_seconds", 7200)),
@@ -178,7 +178,7 @@ def example_config() -> str:
     return """[agent_desk]
 data_dir = ".agent-desk"
 poll_interval_seconds = 60
-max_concurrent_runs = 1
+max_concurrent_runs = 3
 dashboard_host = "127.0.0.1"
 dashboard_port = 8765
 worker_timeout_seconds = 7200

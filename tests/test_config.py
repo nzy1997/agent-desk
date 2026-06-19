@@ -31,6 +31,7 @@ closeout_sandbox = "danger-full-access"
 
         self.assertEqual(config.data_dir, Path(tmp) / ".agent-desk")
         self.assertEqual(config.poll_interval_seconds, 15)
+        self.assertEqual(config.max_concurrent_runs, 3)
         self.assertEqual(config.worker_idle_timeout_seconds, 33)
         self.assertEqual(len(config.repos), 1)
         repo = config.repos[0]

@@ -147,6 +147,12 @@ which follow-up issues are ready; that judgment stays with the resumed Codex
 thread. Unlabeled issues and issues without `agent:blocked` are ignored during
 closeout so ordinary discussion threads or non-agent work are not picked up.
 
+The dashboard defaults to `One closeout per workspace`, so only one PR in a
+repository checkout can be in the merge/cleanup closeout flow at a time. A
+second manual or automatic closeout stays `pr_open` and records a warning event
+until the active closeout finishes. You can turn the runtime setting off from
+the dashboard if a repository can safely close out multiple PRs concurrently.
+
 ## Tests
 
 ```bash

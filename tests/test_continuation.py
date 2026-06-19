@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
 from agent_desk.continuation import ContinuationRunner
+from agent_desk.github_client import PullRequestChecksStatus
 from agent_desk.store import Store
 from agent_desk.worker import CommandResult, FakeCommandRunner
 
@@ -311,6 +312,53 @@ class ContinuationTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertEqual(run["state"], "blocked")
             self.assertEqual(run["last_error"], "checks still pending")
+
+    def test_fix_ci_resumes_thread_with_failing_check_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, worktree = self._store_with_pr_run(root)
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"fixed CI","tests":["python -m unittest"],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/9","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+            pr_status = PullRequestChecksStatus(
+                state="failure",
+                summary="1 failed",
+                head_sha="abc123",
+                checks=[
+                    {
+                        "name": "unit",
+                        "state": "FAILURE",
+                        "bucket": "fail",
+                        "description": "AssertionError in parser tests",
+                        "link": "https://example.test/checks/1",
+                    }
+                ],
+            )
+
+            result = ContinuationRunner(config, store, runner).fix_ci(
+                run_id,
+                pr_status,
+                attempt=2,
+                max_attempts=3,
+            )
+            call = runner.calls[0]
+            run = store.get_run(run_id)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(call.cwd, worktree)
+        self.assertIn("Automatic CI fix attempt 2 of 3", call.stdin)
+        self.assertIn("unit", call.stdin)
+        self.assertIn("AssertionError in parser tests", call.stdin)
+        self.assertIn("push the updates to the existing PR branch", call.stdin)
+        self.assertEqual(run["state"], "pr_open")
+        self.assertEqual(run["stage"], "ci fix pushed")
 
 
 if __name__ == "__main__":

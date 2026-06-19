@@ -35,7 +35,17 @@ def build_state_payload(store: Store, scheduler: Scheduler | None = None) -> dic
         run["project_path"] = project.get("path", "")
     payload["projects"] = projects
     payload["app"] = "Agent Desk"
-    payload["scheduler"] = {"paused": scheduler.paused if scheduler else False}
+    payload["scheduler"] = {
+        "paused": scheduler.paused if scheduler else False,
+        "settings": scheduler.settings_payload()
+        if scheduler
+        else {
+            "auto_start_ready": False,
+            "max_concurrent_runs": 3,
+            "requires_human_review": True,
+            "single_closeout_per_workspace": True,
+        },
+    }
     return payload
 
 
@@ -54,10 +64,26 @@ LOG_FILE_ORDER = [
     "approve-finish.stdout.jsonl",
     "approve-finish.stderr.log",
     "approve-finish-result.json",
+    "auto-finish-prompt.md",
+    "auto-finish.stdout.jsonl",
+    "auto-finish.stderr.log",
+    "auto-finish-result.json",
     "open-pr-prompt.md",
     "open-pr.stdout.jsonl",
     "open-pr.stderr.log",
     "open-pr-result.json",
+    "fix-ci-1-prompt.md",
+    "fix-ci-1.stdout.jsonl",
+    "fix-ci-1.stderr.log",
+    "fix-ci-1-result.json",
+    "fix-ci-2-prompt.md",
+    "fix-ci-2.stdout.jsonl",
+    "fix-ci-2.stderr.log",
+    "fix-ci-2-result.json",
+    "fix-ci-3-prompt.md",
+    "fix-ci-3.stdout.jsonl",
+    "fix-ci-3.stderr.log",
+    "fix-ci-3-result.json",
     "git-fetch.stderr.log",
     "git-fetch.stdout.log",
     "git-worktree.stderr.log",
@@ -127,8 +153,8 @@ def make_handler(
                 return
             if path.startswith("/api/run/") and path.endswith("/approve-finish"):
                 run_id = int(path.split("/")[3])
-                self._start_continuation("approve_finish", run_id)
-                self._send_json({"ok": True, "message": "Approve and finish started", "run_id": run_id})
+                result = scheduler.approve_finish(run_id)
+                self._send_json(result.__dict__)
                 return
             if path == "/api/projects":
                 if not config_path or not scheduler:
@@ -155,6 +181,25 @@ def make_handler(
             if path == "/api/actions/resume":
                 scheduler.resume()
                 self._send_json({"ok": True, "paused": False})
+                return
+            if path == "/api/settings":
+                payload = self._read_json()
+                try:
+                    settings = scheduler.update_settings(
+                        auto_start_ready=payload.get("auto_start_ready") if "auto_start_ready" in payload else None,
+                        max_concurrent_runs=payload.get("max_concurrent_runs") if "max_concurrent_runs" in payload else None,
+                        requires_human_review=payload.get("requires_human_review")
+                        if "requires_human_review" in payload
+                        else None,
+                        single_closeout_per_workspace=payload.get("single_closeout_per_workspace")
+                        if "single_closeout_per_workspace" in payload
+                        else None,
+                    )
+                except (TypeError, ValueError) as exc:
+                    self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                results = scheduler.auto_start_ready_runs() if settings["auto_start_ready"] else []
+                self._send_json({"ok": True, "settings": settings, "results": [result.__dict__ for result in results]})
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -308,7 +353,7 @@ HTML = """<!doctype html>
       text-align: left;
       display: block;
     }
-    .project-form {
+    .project-form, .settings-panel {
       display: grid;
       gap: 8px;
       margin-bottom: 16px;
@@ -319,6 +364,31 @@ HTML = """<!doctype html>
       border-radius: 6px;
       padding: 7px 8px;
       font: inherit;
+    }
+    .settings-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px;
+    }
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 30px;
+    }
+    .setting-row input[type="number"] {
+      width: 72px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 6px;
+      font: inherit;
+    }
+    .setting-row input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
     }
     .section-head {
       display: flex;
@@ -333,6 +403,22 @@ HTML = """<!doctype html>
     .state-ready { color: var(--warn); }
     .state-blocked, .state-failed { color: var(--bad); }
     .state-done, .state-pr_open, .state-needs_review { color: var(--good); }
+    .pr-status {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+      margin-top: 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 3px 6px;
+      font-size: 12px;
+      background: #fff;
+    }
+    .pr-status-pending { border-color: #f7c46c; color: var(--warn); }
+    .pr-status-success { border-color: #8fd0ad; color: var(--good); }
+    .pr-status-failure { border-color: #f4b7b0; color: var(--bad); }
+    .pr-status-unknown { color: var(--muted); }
     .event.error { border-color: #f4b7b0; }
     .event.warning { border-color: #f7c46c; }
     .log-links {
@@ -421,6 +507,29 @@ HTML = """<!doctype html>
         <input id="project-path" placeholder="/path/to/project">
         <button onclick="addProject()">Add project</button>
       </div>
+      <div class="settings-panel">
+        <div class="section-head">
+          <h2>Run Settings</h2>
+          <button onclick="saveSettings()">Save</button>
+        </div>
+        <label class="setting-row" for="auto-start-ready">
+          <span>Auto-start ready</span>
+          <input id="auto-start-ready" type="checkbox" onchange="markSettingsDirty()">
+        </label>
+        <label class="setting-row" for="max-concurrent-runs">
+          <span>Max parallel</span>
+          <input id="max-concurrent-runs" type="number" min="1" step="1" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+        </label>
+        <label class="setting-row" for="requires-human-review">
+          <span>Require human review</span>
+          <input id="requires-human-review" type="checkbox" onchange="markSettingsDirty()">
+        </label>
+        <label class="setting-row" for="single-closeout-per-workspace">
+          <span>One closeout per workspace</span>
+          <input id="single-closeout-per-workspace" type="checkbox" onchange="markSettingsDirty()">
+        </label>
+        <div id="settings-status" class="muted">Defaults loaded</div>
+      </div>
       <div id="stats"></div>
     </section>
     <section>
@@ -438,6 +547,7 @@ HTML = """<!doctype html>
     </section>
   </main>
   <script>
+    let settingsDirty = false;
     async function action(path) {
       await fetch(path, { method: 'POST' });
       await refresh();
@@ -468,6 +578,38 @@ HTML = """<!doctype html>
         await postJson('/api/projects', { path });
         input.value = '';
       } catch (error) {
+        alert(error.message || String(error));
+      }
+    }
+    function markSettingsDirty() {
+      settingsDirty = true;
+      const status = document.getElementById('settings-status');
+      if (status) status.textContent = 'Unsaved changes';
+    }
+    function renderSettings(state) {
+      if (settingsDirty) return;
+      const settings = (state.scheduler && state.scheduler.settings) || {};
+      document.getElementById('auto-start-ready').checked = !!settings.auto_start_ready;
+      document.getElementById('max-concurrent-runs').value = Number(settings.max_concurrent_runs || 3);
+      document.getElementById('requires-human-review').checked = settings.requires_human_review !== false;
+      document.getElementById('single-closeout-per-workspace').checked = settings.single_closeout_per_workspace !== false;
+      document.getElementById('settings-status').textContent = 'Runtime settings';
+    }
+    async function saveSettings() {
+      const maxInput = document.getElementById('max-concurrent-runs');
+      const max = Math.max(1, Number(maxInput.value || 1));
+      settingsDirty = false;
+      try {
+        await postJson('/api/settings', {
+          auto_start_ready: document.getElementById('auto-start-ready').checked,
+          max_concurrent_runs: max,
+          requires_human_review: document.getElementById('requires-human-review').checked,
+          single_closeout_per_workspace: document.getElementById('single-closeout-per-workspace').checked
+        });
+        document.getElementById('settings-status').textContent = 'Saved';
+      } catch (error) {
+        settingsDirty = true;
+        document.getElementById('settings-status').textContent = 'Save failed';
         alert(error.message || String(error));
       }
     }
@@ -505,6 +647,21 @@ HTML = """<!doctype html>
       const feedback = box ? box.value : '';
       return postJson(`/api/run/${runId}/request-changes`, { feedback });
     }
+    function prStatus(run) {
+      if (!run.pr_url) return '';
+      const status = run.pr_ci_status || 'unknown';
+      const labels = {
+        pending: 'CI running',
+        success: 'CI passed',
+        failure: 'CI failed',
+        unknown: 'CI unknown'
+      };
+      const summary = run.pr_ci_summary ? ` · ${esc(run.pr_ci_summary)}` : '';
+      const attempts = Number(run.ci_fix_attempts || 0);
+      const fixes = attempts ? ` · fixes ${attempts}/3` : '';
+      const label = labels[status] || labels.unknown;
+      return `<div class="pr-status pr-status-${esc(status)}"><strong>${esc(label)}</strong><span class="muted">${summary}${fixes}</span></div>`;
+    }
     function runActions(run) {
       if (run.state === 'ready') {
         return `<div class="run-actions"><button class="primary" onclick="action('/api/run/${run.id}/start')">Run</button></div>`;
@@ -525,6 +682,7 @@ HTML = """<!doctype html>
         <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
         <div>Stage: ${esc(run.stage)}</div>
         ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
+        ${prStatus(run)}
         ${resumeCommand(run)}
         ${runActions(run)}
         ${logLinks(run)}
@@ -570,6 +728,7 @@ HTML = """<!doctype html>
       const state = await res.json();
       const stats = state.stats || {};
       document.getElementById('health').textContent = `${state.scheduler.paused ? 'Paused' : 'Active'} · ${Object.values(stats).reduce((a,b) => a + b, 0)} runs tracked`;
+      renderSettings(state);
       document.getElementById('stats').innerHTML = Object.entries(stats).sort().map(([key, value]) =>
         `<div class="metric-row"><span>${esc(key)}</span><strong>${value}</strong></div>`
       ).join('') || '<div class="muted">No runs yet</div>';
