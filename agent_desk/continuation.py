@@ -77,6 +77,7 @@ class ContinuationRunner:
         max_attempts: int,
     ) -> ContinuationResult:
         run = self.store.get_run(run_id)
+        repo = self._repo_for_run(run)
         prompt = render_fix_ci_prompt(run, pr_status, attempt=attempt, max_attempts=max_attempts)
         return self._resume(
             run_id,
@@ -84,6 +85,7 @@ class ContinuationRunner:
             prompt,
             success_state="pr_open",
             success_stage="ci fix pushed",
+            sandbox=repo.closeout_sandbox,
         )
 
     def _repo_for_run(self, run: dict[str, Any]) -> RepoConfig:

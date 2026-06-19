@@ -360,6 +360,53 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(run["state"], "pr_open")
         self.assertEqual(run["stage"], "ci fix pushed")
 
+    def test_fix_ci_uses_configured_closeout_sandbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, worktree = self._store_with_pr_run(root)
+            config = AgentDeskConfig(
+                data_dir=config.data_dir,
+                repos=[
+                    RepoConfig(
+                        name="octo/example",
+                        local_path=root / "repo",
+                        base_branch="main",
+                        closeout_sandbox="danger-full-access",
+                    )
+                ],
+            )
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"fixed CI","tests":[],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/9","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+            pr_status = PullRequestChecksStatus(
+                state="failure",
+                summary="Pull request has merge conflicts",
+                head_sha="abc123",
+                checks=[{"name": "mergeable", "state": "CONFLICTING"}],
+            )
+
+            result = ContinuationRunner(config, store, runner).fix_ci(
+                run_id,
+                pr_status,
+                attempt=1,
+                max_attempts=3,
+            )
+            call = runner.calls[0]
+
+        self.assertTrue(result.ok)
+        self.assertEqual(call.cwd, worktree)
+        self.assertEqual(
+            call.argv[:8],
+            ["codex", "--ask-for-approval", "never", "--sandbox", "danger-full-access", "-C", str(worktree), "exec"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

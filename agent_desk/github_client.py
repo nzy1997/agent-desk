@@ -15,6 +15,13 @@ class PullRequestChecksStatus:
     checks: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class PullRequestViewStatus:
+    head_sha: str
+    mergeable: str
+    merge_state_status: str
+
+
 class GitHubClient:
     def list_ready_issues(self, repo: str, label: str, limit: int = 10) -> list[dict[str, Any]]:
         completed = subprocess.run(
@@ -82,7 +89,23 @@ class GitHubClient:
         if not pr_number:
             return PullRequestChecksStatus(state="unknown", summary="No pull request URL", head_sha="", checks=[])
 
-        head_sha = self._pr_head_sha(repo, pr_number)
+        pr_view = self._pr_view_status(repo, pr_number)
+        if pr_has_merge_conflict(pr_view):
+            return PullRequestChecksStatus(
+                state="failure",
+                summary="Pull request has merge conflicts",
+                head_sha=pr_view.head_sha,
+                checks=[
+                    {
+                        "name": "mergeable",
+                        "state": pr_view.mergeable or pr_view.merge_state_status,
+                        "bucket": "fail",
+                        "description": "Pull request has merge conflicts with the base branch.",
+                        "link": pr_url,
+                        "workflow": "",
+                    }
+                ],
+            )
         completed = subprocess.run(
             [
                 "gh",
@@ -100,30 +123,34 @@ class GitHubClient:
         )
         if not completed.stdout.strip():
             detail = completed.stderr.strip() or "No checks reported"
-            return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=head_sha, checks=[])
+            return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=pr_view.head_sha, checks=[])
         try:
             raw_checks = json.loads(completed.stdout)
         except json.JSONDecodeError:
             detail = completed.stderr.strip() or "Could not parse PR checks"
-            return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=head_sha, checks=[])
+            return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=pr_view.head_sha, checks=[])
         checks = normalize_checks(raw_checks)
         state, summary = summarize_checks(checks)
-        return PullRequestChecksStatus(state=state, summary=summary, head_sha=head_sha, checks=checks)
+        return PullRequestChecksStatus(state=state, summary=summary, head_sha=pr_view.head_sha, checks=checks)
 
-    def _pr_head_sha(self, repo: str, pr_number: str) -> str:
+    def _pr_view_status(self, repo: str, pr_number: str) -> PullRequestViewStatus:
         completed = subprocess.run(
-            ["gh", "pr", "view", pr_number, "--repo", repo, "--json", "headRefOid"],
+            ["gh", "pr", "view", pr_number, "--repo", repo, "--json", "headRefOid,mergeable,mergeStateStatus"],
             text=True,
             capture_output=True,
             check=False,
         )
         if not completed.stdout.strip():
-            return ""
+            return PullRequestViewStatus(head_sha="", mergeable="", merge_state_status="")
         try:
             payload = json.loads(completed.stdout)
         except json.JSONDecodeError:
-            return ""
-        return str(payload.get("headRefOid") or "")
+            return PullRequestViewStatus(head_sha="", mergeable="", merge_state_status="")
+        return PullRequestViewStatus(
+            head_sha=str(payload.get("headRefOid") or ""),
+            mergeable=str(payload.get("mergeable") or ""),
+            merge_state_status=str(payload.get("mergeStateStatus") or ""),
+        )
 
 
 def parse_pr_number(pr_url: str) -> str:
@@ -149,6 +176,12 @@ def normalize_checks(raw_checks: Any) -> list[dict[str, Any]]:
             }
         )
     return checks
+
+
+def pr_has_merge_conflict(pr_view: PullRequestViewStatus) -> bool:
+    mergeable = pr_view.mergeable.upper()
+    merge_state_status = pr_view.merge_state_status.upper()
+    return mergeable == "CONFLICTING" or merge_state_status == "DIRTY"
 
 
 def summarize_checks(checks: list[dict[str, Any]]) -> tuple[str, str]:
