@@ -29,24 +29,64 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(payload["app"], "Agent Desk")
         self.assertEqual(payload["runs"][0]["issue_number"], 5)
 
-    def test_state_payload_includes_runtime_scheduler_settings(self):
+    def test_state_payload_orders_runs_by_display_priority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            running_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=3,
+                issue_title="Running",
+                issue_url="https://github.com/octo/example/issues/3",
+                branch_name="agent/issue-3-running",
+            )
+            store.update_run(running_id, state="running", stage="claimed")
+            ready_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=2,
+                issue_title="Ready",
+                issue_url="https://github.com/octo/example/issues/2",
+                branch_name="agent/issue-2-ready",
+            )
+            store.update_run(ready_id, state="ready", stage="waiting for human run")
+            done_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=1,
+                issue_title="Done",
+                issue_url="https://github.com/octo/example/issues/1",
+                branch_name="agent/issue-1-done",
+            )
+            store.update_run(done_id, state="done", stage="done")
+
+            payload = build_state_payload(store)
+
+        self.assertEqual([run["state"] for run in payload["runs"]], ["running", "ready", "done"])
+
+    def test_state_payload_includes_workspace_scheduler_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / "desk.sqlite")
             config = AgentDeskConfig(
                 data_dir=root / "data",
-                max_concurrent_runs=3,
-                repos=[RepoConfig(name="octo/example", local_path=root / "example")],
+                repos=[
+                    RepoConfig(
+                        name="octo/example",
+                        local_path=root / "example",
+                        auto_start_ready=True,
+                        max_concurrent_runs=2,
+                    )
+                ],
             )
             scheduler = Scheduler(config, store)
 
             payload = build_state_payload(store, scheduler)
 
+        self.assertEqual(payload["scheduler"]["settings"], None)
+        self.assertEqual(payload["projects"][0]["path"], str(root / "example"))
         self.assertEqual(
-            payload["scheduler"]["settings"],
+            payload["projects"][0]["settings"],
             {
-                "auto_start_ready": False,
-                "max_concurrent_runs": 3,
+                "auto_start_ready": True,
+                "max_concurrent_runs": 2,
                 "requires_human_review": True,
                 "single_closeout_per_workspace": True,
             },
@@ -204,7 +244,9 @@ class DashboardTests(unittest.TestCase):
             payload = build_state_payload(store, scheduler)
             run = payload["runs"][0]
 
-        self.assertEqual(payload["projects"], [{"name": "octo/example", "path": str(repo_path)}])
+        self.assertEqual(payload["projects"][0]["name"], "octo/example")
+        self.assertEqual(payload["projects"][0]["path"], str(repo_path))
+        self.assertEqual(payload["projects"][0]["settings"]["max_concurrent_runs"], 1)
         self.assertEqual(run["project_path"], str(repo_path))
         self.assertEqual(run["project_name"], "octo/example")
 
@@ -215,8 +257,10 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("selectProjectByPath(this)", HTML)
         self.assertIn("Back to folders", HTML)
 
-    def test_dashboard_html_renders_runtime_settings_controls(self):
+    def test_dashboard_html_renders_workspace_settings_controls(self):
         self.assertIn("/api/settings", HTML)
+        self.assertIn("workspace_path", HTML)
+        self.assertIn("Workspace Settings", HTML)
         self.assertIn("auto-start-ready", HTML)
         self.assertIn("max-concurrent-runs", HTML)
         self.assertIn("requires-human-review", HTML)

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
+from agent_desk.continuation import ContinuationResult
 from agent_desk.github_client import PullRequestChecksStatus
 from agent_desk.scheduler import Scheduler
 from agent_desk.store import Store
@@ -64,6 +65,42 @@ class FakePullRequestGitHub(FakeGitHub):
         return self.pr_status
 
 
+class SequencedPullRequestGitHub(FakeGitHub):
+    def __init__(self, *statuses):
+        super().__init__()
+        self.statuses = list(statuses)
+        self.pr_status_calls = []
+
+    def pr_checks_status(self, repo, pr_url):
+        self.pr_status_calls.append((repo, pr_url))
+        if len(self.statuses) == 1:
+            return self.statuses[0]
+        return self.statuses.pop(0)
+
+
+class BlockingCloseoutContinuationRunner:
+    def __init__(self, store):
+        self.store = store
+        self.calls = []
+
+    def approve_finish(self, run_id):
+        self.calls.append(("approve_finish", run_id))
+        return self._block(run_id)
+
+    def finish_after_ci_success(self, run_id):
+        self.calls.append(("finish_after_ci_success", run_id))
+        return self._block(run_id)
+
+    def fix_ci(self, run_id, pr_status, attempt, max_attempts):
+        self.calls.append((run_id, pr_status, attempt, max_attempts))
+
+    def _block(self, run_id):
+        message = "checks are failing"
+        self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
+        self.store.add_event(run_id, "warning", "auto-finish", message, {"status": "blocked"})
+        return ContinuationResult(False, message, run_id)
+
+
 class SchedulerTests(unittest.TestCase):
     def test_run_available_discovers_ready_runs_without_starting_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,11 +151,10 @@ class SchedulerTests(unittest.TestCase):
             store = Store(root / "desk.sqlite")
             config = AgentDeskConfig(
                 data_dir=root / "data",
-                max_concurrent_runs=3,
-                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                repos=[RepoConfig(name="octo/one", local_path=root / "one", max_concurrent_runs=2)],
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
-            scheduler.update_settings(max_concurrent_runs=1)
+            scheduler.update_settings(workspace_path=root / "one", max_concurrent_runs=1)
             run_ids = [result.run_id for result in scheduler.run_available()]
 
             first = scheduler.start_run(run_ids[0])
@@ -126,7 +162,7 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertTrue(first.started)
         self.assertFalse(second.started)
-        self.assertEqual(second.message, "Max concurrent runs reached")
+        self.assertEqual(second.message, "Max concurrent runs reached for workspace")
 
     def test_runtime_settings_default_to_one_closeout_per_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,11 +174,27 @@ class SchedulerTests(unittest.TestCase):
                 github=FakeGitHub(),
             )
 
-            settings = scheduler.settings_payload()
-            updated = scheduler.update_settings(single_closeout_per_workspace=False)
+            settings = scheduler.settings_payload(root / "one")
+            updated = scheduler.update_settings(workspace_path=root / "one", single_closeout_per_workspace=False)
 
         self.assertTrue(settings["single_closeout_per_workspace"])
         self.assertFalse(updated["single_closeout_per_workspace"])
+
+    def test_workspace_settings_default_to_manual_single_worker_with_human_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]),
+                store,
+                github=FakeGitHub(),
+            )
+
+            settings = scheduler.settings_payload(root / "one")
+
+        self.assertFalse(settings["auto_start_ready"])
+        self.assertEqual(settings["max_concurrent_runs"], 1)
+        self.assertTrue(settings["requires_human_review"])
 
     def test_poll_once_auto_starts_ready_runs_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -150,16 +202,38 @@ class SchedulerTests(unittest.TestCase):
             store = Store(root / "desk.sqlite")
             config = AgentDeskConfig(
                 data_dir=root / "data",
-                max_concurrent_runs=3,
-                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                repos=[RepoConfig(name="octo/one", local_path=root / "one", max_concurrent_runs=2)],
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
-            scheduler.update_settings(auto_start_ready=True, max_concurrent_runs=2)
+            scheduler.update_settings(workspace_path=root / "one", auto_start_ready=True)
 
             scheduler.poll_once()
             stats = store.dashboard_state()["stats"]
 
         self.assertEqual(stats["running"], 2)
+
+    def test_workspace_parallel_limit_does_not_block_other_workspaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[
+                    RepoConfig(name="octo/one", local_path=root / "one", max_concurrent_runs=1),
+                    RepoConfig(name="octo/two", local_path=root / "two", max_concurrent_runs=1),
+                ],
+            )
+            scheduler = NoopScheduler(config, store, github=FakeGitHub())
+            run_ids = [result.run_id for result in scheduler.run_available()]
+
+            first = scheduler.start_run(run_ids[0])
+            second_same_workspace = scheduler.start_run(run_ids[1])
+            other_workspace = scheduler.start_run(run_ids[2])
+
+        self.assertTrue(first.started)
+        self.assertFalse(second_same_workspace.started)
+        self.assertEqual(second_same_workspace.message, "Max concurrent runs reached for workspace")
+        self.assertTrue(other_workspace.started)
 
     def test_retry_uses_unique_branch_name_after_failed_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -262,7 +336,7 @@ class SchedulerTests(unittest.TestCase):
                 github=FakePullRequestGitHub(pr_status),
                 continuation_factory=lambda config, store: continuation,
             )
-            scheduler.update_settings(requires_human_review=False)
+            scheduler.update_settings(workspace_path=root / "one", requires_human_review=False)
 
             scheduler.monitor_prs()
             run = store.get_run(run_id)
@@ -271,6 +345,65 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(run["state"], "running")
         self.assertEqual(run["stage"], "auto-finishing after ci success")
         self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
+
+    def test_auto_finish_blocked_by_late_failing_checks_starts_auto_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="019ed932-fe5d-7391-b856-98b2239a6380",
+                worktree_path=str(root / "worktree"),
+            )
+            initial_success = PullRequestChecksStatus(
+                state="success",
+                summary="3 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            late_failure = PullRequestChecksStatus(
+                state="failure",
+                summary="2 failed, 3 passed",
+                head_sha="abc123",
+                checks=[
+                    {"name": "codecov/patch", "state": "FAILURE"},
+                    {"name": "codecov/project", "state": "FAILURE"},
+                ],
+            )
+            github = SequencedPullRequestGitHub(initial_success, late_failure)
+            continuation = BlockingCloseoutContinuationRunner(store)
+            scheduler = NoopScheduler(
+                AgentDeskConfig(data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]),
+                store,
+                github=github,
+                continuation_factory=lambda config, store: continuation,
+            )
+            scheduler.update_settings(workspace_path=root / "one", requires_human_review=False)
+
+            scheduler.monitor_prs()
+            run = store.get_run(run_id)
+
+        self.assertEqual(github.pr_status_calls, [("octo/one", "https://github.com/octo/one/pull/9")] * 2)
+        self.assertEqual(run["state"], "running")
+        self.assertEqual(run["stage"], "auto-fixing ci (1/3)")
+        self.assertEqual(run["ci_fix_attempts"], 1)
+        self.assertEqual(
+            continuation.calls,
+            [
+                ("finish_after_ci_success", run_id),
+                (run_id, late_failure, 1, 3),
+            ],
+        )
 
     def test_monitor_prs_allows_only_one_auto_finish_per_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,7 +445,7 @@ class SchedulerTests(unittest.TestCase):
                 github=FakePullRequestGitHub(pr_status),
                 continuation_factory=lambda config, store: continuation,
             )
-            scheduler.update_settings(requires_human_review=False)
+            scheduler.update_settings(workspace_path=root / "one", requires_human_review=False)
 
             results = scheduler.monitor_prs()
             first = store.get_run(first_id)
@@ -398,7 +531,7 @@ class SchedulerTests(unittest.TestCase):
                 github=FakeGitHub(),
                 continuation_factory=lambda config, store: continuation,
             )
-            scheduler.update_settings(single_closeout_per_workspace=False)
+            scheduler.update_settings(workspace_path=root / "one", single_closeout_per_workspace=False)
 
             result = scheduler.approve_finish(candidate_id)
             candidate = store.get_run(candidate_id)
@@ -490,7 +623,7 @@ class SchedulerTests(unittest.TestCase):
                 github=github,
                 continuation_factory=lambda config, store: continuation,
             )
-            scheduler.update_settings(auto_start_ready=True, max_concurrent_runs=1)
+            scheduler.update_settings(workspace_path=root / "one", auto_start_ready=True, max_concurrent_runs=1)
 
             scheduler.poll_once()
             stale_run = store.get_run(stale_run_id)

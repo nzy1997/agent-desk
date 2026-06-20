@@ -1,7 +1,6 @@
 [agent_desk]
 data_dir = ".agent-desk"
 poll_interval_seconds = 60
-max_concurrent_runs = 3
 dashboard_host = "127.0.0.1"
 dashboard_port = 8765
 worker_timeout_seconds = 7200
@@ -17,6 +16,31 @@ pr_open_label = "agent:pr-open"
 blocked_label = "agent:blocked"
 needs_review_label = "agent:needs-human-review"
 test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
+auto_start_ready = false
+max_concurrent_runs = 1
+requires_human_review = true
+single_closeout_per_workspace = true
+
+# Label mutation is enabled so Agent Desk can move issues through agent:* states.
+# PR creation is enabled for the Superpowers-to-PR flow.
+mutate_github = true
+push_pr = true
+closeout_sandbox = "danger-full-access"
+
+[[repos]]
+name = "nzy1997/rstim"
+local_path = "/Users/nzy/rcode/rstim"
+base_branch = "master"
+ready_label = "agent:ready"
+running_label = "agent:running"
+pr_open_label = "agent:pr-open"
+blocked_label = "agent:blocked"
+needs_review_label = "agent:needs-human-review"
+test_command = "cargo test"
+auto_start_ready = false
+max_concurrent_runs = 1
+requires_human_review = true
+single_closeout_per_workspace = true
 
 # Label mutation is enabled so Agent Desk can move issues through agent:* states.
 # PR creation is enabled for the Superpowers-to-PR flow.

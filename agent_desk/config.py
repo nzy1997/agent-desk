@@ -19,6 +19,10 @@ class RepoConfig:
     blocked_label: str = "agent:blocked"
     needs_review_label: str = "agent:needs-human-review"
     test_command: str = ""
+    auto_start_ready: bool = False
+    max_concurrent_runs: int = 1
+    requires_human_review: bool = True
+    single_closeout_per_workspace: bool = True
     mutate_github: bool = False
     push_pr: bool = False
     closeout_sandbox: str = "workspace-write"
@@ -63,6 +67,10 @@ def load_config(path: str | Path) -> AgentDeskConfig:
                 blocked_label=repo_raw.get("blocked_label", "agent:blocked"),
                 needs_review_label=repo_raw.get("needs_review_label", "agent:needs-human-review"),
                 test_command=repo_raw.get("test_command", ""),
+                auto_start_ready=bool(repo_raw.get("auto_start_ready", False)),
+                max_concurrent_runs=max(1, int(repo_raw.get("max_concurrent_runs", 1))),
+                requires_human_review=bool(repo_raw.get("requires_human_review", True)),
+                single_closeout_per_workspace=bool(repo_raw.get("single_closeout_per_workspace", True)),
                 mutate_github=bool(repo_raw.get("mutate_github", False)),
                 push_pr=bool(repo_raw.get("push_pr", False)),
                 closeout_sandbox=repo_raw.get("closeout_sandbox", "workspace-write"),
@@ -136,6 +144,10 @@ def add_project_to_config(config_path: str | Path, local_path: str | Path, repo_
         blocked_label=template.blocked_label,
         needs_review_label=template.needs_review_label,
         test_command=template.test_command,
+        auto_start_ready=template.auto_start_ready,
+        max_concurrent_runs=template.max_concurrent_runs,
+        requires_human_review=template.requires_human_review,
+        single_closeout_per_workspace=template.single_closeout_per_workspace,
         mutate_github=template.mutate_github,
         push_pr=template.push_pr,
         closeout_sandbox=template.closeout_sandbox,
@@ -167,6 +179,10 @@ def _repo_config_toml(repo: RepoConfig) -> str:
             f"blocked_label = {_toml_string(repo.blocked_label)}",
             f"needs_review_label = {_toml_string(repo.needs_review_label)}",
             f"test_command = {_toml_string(repo.test_command)}",
+            f"auto_start_ready = {_toml_bool(repo.auto_start_ready)}",
+            f"max_concurrent_runs = {repo.max_concurrent_runs}",
+            f"requires_human_review = {_toml_bool(repo.requires_human_review)}",
+            f"single_closeout_per_workspace = {_toml_bool(repo.single_closeout_per_workspace)}",
             f"mutate_github = {_toml_bool(repo.mutate_github)}",
             f"push_pr = {_toml_bool(repo.push_pr)}",
             f"closeout_sandbox = {_toml_string(repo.closeout_sandbox)}",
@@ -178,7 +194,6 @@ def example_config() -> str:
     return """[agent_desk]
 data_dir = ".agent-desk"
 poll_interval_seconds = 60
-max_concurrent_runs = 3
 dashboard_host = "127.0.0.1"
 dashboard_port = 8765
 worker_timeout_seconds = 7200
@@ -194,6 +209,10 @@ pr_open_label = "agent:pr-open"
 blocked_label = "agent:blocked"
 needs_review_label = "agent:needs-human-review"
 test_command = "python -m unittest"
+auto_start_ready = false
+max_concurrent_runs = 1
+requires_human_review = true
+single_closeout_per_workspace = true
 
 # Keep both false until you are comfortable with the loop.
 mutate_github = false

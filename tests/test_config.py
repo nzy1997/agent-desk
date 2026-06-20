@@ -22,6 +22,10 @@ name = "octo/example"
 local_path = "target"
 base_branch = "main"
 test_command = "python -m unittest"
+auto_start_ready = true
+max_concurrent_runs = 2
+requires_human_review = false
+single_closeout_per_workspace = false
 closeout_sandbox = "danger-full-access"
 """.strip(),
                 encoding="utf-8",
@@ -41,7 +45,32 @@ closeout_sandbox = "danger-full-access"
         self.assertEqual(repo.ready_label, "agent:ready")
         self.assertEqual(repo.running_label, "agent:running")
         self.assertEqual(repo.test_command, "python -m unittest")
+        self.assertTrue(repo.auto_start_ready)
+        self.assertEqual(repo.max_concurrent_runs, 2)
+        self.assertFalse(repo.requires_human_review)
+        self.assertFalse(repo.single_closeout_per_workspace)
         self.assertEqual(repo.closeout_sandbox, "danger-full-access")
+
+    def test_repo_scheduler_settings_default_to_manual_single_worker_and_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "repos.toml"
+            config_path.write_text(
+                """
+[agent_desk]
+data_dir = ".agent-desk"
+
+[[repos]]
+name = "octo/example"
+local_path = "/repo"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            repo = load_config(config_path).repos[0]
+
+        self.assertFalse(repo.auto_start_ready)
+        self.assertEqual(repo.max_concurrent_runs, 1)
+        self.assertTrue(repo.requires_human_review)
 
     def test_parse_github_repo_name_from_common_remote_urls(self):
         self.assertEqual(parse_github_repo_name("git@github.com:octo/example.git"), "octo/example")

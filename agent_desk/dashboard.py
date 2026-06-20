@@ -15,13 +15,24 @@ from .store import Store
 from .worker import extract_thread_id, format_resume_command
 
 
+RUN_DISPLAY_ORDER = {
+    "running": 0,
+    "ready": 1,
+    "done": 3,
+}
+
+
 def build_state_payload(store: Store, scheduler: Scheduler | None = None) -> dict[str, Any]:
     payload = store.dashboard_state()
     repo_paths = {}
     projects = []
     if scheduler:
         for repo in scheduler.config.repos:
-            project = {"name": repo.name, "path": str(repo.local_path)}
+            project = {
+                "name": repo.name,
+                "path": str(repo.local_path),
+                "settings": scheduler.settings_payload(repo.local_path),
+            }
             projects.append(project)
             repo_paths[repo.name] = project
     for run in payload["runs"]:
@@ -33,20 +44,19 @@ def build_state_payload(store: Store, scheduler: Scheduler | None = None) -> dic
         project = repo_paths.get(str(run.get("repo_name") or ""), {})
         run["project_name"] = project.get("name", run.get("repo_name") or "")
         run["project_path"] = project.get("path", "")
+    payload["runs"] = sorted(payload["runs"], key=run_display_key)
     payload["projects"] = projects
     payload["app"] = "Agent Desk"
     payload["scheduler"] = {
         "paused": scheduler.paused if scheduler else False,
-        "settings": scheduler.settings_payload()
-        if scheduler
-        else {
-            "auto_start_ready": False,
-            "max_concurrent_runs": 3,
-            "requires_human_review": True,
-            "single_closeout_per_workspace": True,
-        },
+        "settings": None,
     }
     return payload
+
+
+def run_display_key(run: dict[str, Any]) -> tuple[int, int]:
+    state = str(run.get("state") or "")
+    return (RUN_DISPLAY_ORDER.get(state, 2), -int(run.get("id") or 0))
 
 
 LOG_FILE_ORDER = [
@@ -186,6 +196,7 @@ def make_handler(
                 payload = self._read_json()
                 try:
                     settings = scheduler.update_settings(
+                        workspace_path=payload.get("workspace_path") if "workspace_path" in payload else None,
                         auto_start_ready=payload.get("auto_start_ready") if "auto_start_ready" in payload else None,
                         max_concurrent_runs=payload.get("max_concurrent_runs") if "max_concurrent_runs" in payload else None,
                         requires_human_review=payload.get("requires_human_review")
@@ -198,7 +209,11 @@ def make_handler(
                 except (TypeError, ValueError) as exc:
                     self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
                     return
-                results = scheduler.auto_start_ready_runs() if settings["auto_start_ready"] else []
+                results = (
+                    scheduler.auto_start_ready_runs(payload.get("workspace_path"))
+                    if settings["auto_start_ready"]
+                    else []
+                )
                 self._send_json({"ok": True, "settings": settings, "results": [result.__dict__ for result in results]})
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -509,8 +524,8 @@ HTML = """<!doctype html>
       </div>
       <div class="settings-panel">
         <div class="section-head">
-          <h2>Run Settings</h2>
-          <button onclick="saveSettings()">Save</button>
+          <h2>Workspace Settings</h2>
+          <button id="settings-save" onclick="saveSettings()">Save</button>
         </div>
         <label class="setting-row" for="auto-start-ready">
           <span>Auto-start ready</span>
@@ -548,6 +563,7 @@ HTML = """<!doctype html>
   </main>
   <script>
     let settingsDirty = false;
+    let settingsProjectPath = '';
     async function action(path) {
       await fetch(path, { method: 'POST' });
       await refresh();
@@ -586,21 +602,56 @@ HTML = """<!doctype html>
       const status = document.getElementById('settings-status');
       if (status) status.textContent = 'Unsaved changes';
     }
+    function settingsControls() {
+      return [
+        document.getElementById('auto-start-ready'),
+        document.getElementById('max-concurrent-runs'),
+        document.getElementById('requires-human-review'),
+        document.getElementById('single-closeout-per-workspace'),
+        document.getElementById('settings-save')
+      ];
+    }
+    function setSettingsDisabled(disabled) {
+      settingsControls().forEach(control => {
+        if (control) control.disabled = disabled;
+      });
+    }
+    function projectForPath(state, path) {
+      return (state.projects || []).find(item => item.path === path);
+    }
     function renderSettings(state) {
+      const path = selectedProjectPath();
+      if (path !== settingsProjectPath) {
+        settingsDirty = false;
+        settingsProjectPath = path;
+      }
       if (settingsDirty) return;
-      const settings = (state.scheduler && state.scheduler.settings) || {};
+      const project = path ? projectForPath(state, path) : null;
+      const settings = project && project.settings ? project.settings : {
+        auto_start_ready: false,
+        max_concurrent_runs: 1,
+        requires_human_review: true,
+        single_closeout_per_workspace: true
+      };
+      setSettingsDisabled(!project);
       document.getElementById('auto-start-ready').checked = !!settings.auto_start_ready;
-      document.getElementById('max-concurrent-runs').value = Number(settings.max_concurrent_runs || 3);
+      document.getElementById('max-concurrent-runs').value = Number(settings.max_concurrent_runs || 1);
       document.getElementById('requires-human-review').checked = settings.requires_human_review !== false;
       document.getElementById('single-closeout-per-workspace').checked = settings.single_closeout_per_workspace !== false;
-      document.getElementById('settings-status').textContent = 'Runtime settings';
+      document.getElementById('settings-status').textContent = project ? `Settings for ${project.name}` : 'Select a folder';
     }
     async function saveSettings() {
+      const path = selectedProjectPath();
+      if (!path) {
+        document.getElementById('settings-status').textContent = 'Select a folder';
+        return;
+      }
       const maxInput = document.getElementById('max-concurrent-runs');
       const max = Math.max(1, Number(maxInput.value || 1));
       settingsDirty = false;
       try {
         await postJson('/api/settings', {
+          workspace_path: path,
           auto_start_ready: document.getElementById('auto-start-ready').checked,
           max_concurrent_runs: max,
           requires_human_review: document.getElementById('requires-human-review').checked,

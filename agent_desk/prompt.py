@@ -21,8 +21,8 @@ def render_worker_prompt(
         finish_instruction = (
             "After implementation and verification are complete, create a pull request.\n"
             'When finishing asks what to do with the branch, choose "Push and create a Pull Request".\n'
-            "8. Stop after the pull request is created. Do not merge.\n"
-            '9. If implementation and verification are complete but the only failed step is creating the pull request, '
+            "9. Stop after the pull request is created. Do not merge.\n"
+            '10. If implementation and verification are complete but the only failed step is creating the pull request, '
             'return status "done" with pr_url set to an empty string. Agent Desk will retry PR creation from the '
             "manager process. Record the PR creation failure in risks or questions."
         )
@@ -33,7 +33,7 @@ def render_worker_prompt(
         )
         finish_instruction = (
             'When finishing asks what to do with the branch, choose "Keep the branch as-is".\n'
-            "8. Stop after the local branch is ready. Do not push, open a pull request, or merge."
+            "9. Stop after the local branch is ready. Do not push, open a pull request, or merge."
         )
     return f"""You are an autonomous Codex worker running under Agent Desk.
 
@@ -61,12 +61,13 @@ Standing Answer Policy:
 
 Required Superpowers workflow:
 1. Read the repository instructions, especially AGENTS.md if present.
-2. Use superpowers:brainstorming to explore and approve the design using the Standing Answer Policy.
-3. When brainstorming transitions to implementation planning, use superpowers:writing-plans.
-4. When asked to choose an execution approach, choose the option currently marked recommended. Do not hard-code a specific execution mode.
-5. Execute the implementation plan using the chosen recommended Superpowers execution approach.
-6. Run this verification command when applicable: {test_line}
-7. {finish_instruction}
+2. Read the relevant issue and pull request context before making changes.
+3. Use superpowers:brainstorming to explore and approve the design using the Standing Answer Policy.
+4. When brainstorming transitions to implementation planning, use superpowers:writing-plans.
+5. When asked to choose an execution approach, choose the option currently marked recommended. Do not hard-code a specific execution mode.
+6. Execute the implementation plan using the chosen recommended Superpowers execution approach.
+7. Run this verification command when applicable: {test_line}
+8. {finish_instruction}
 
 Final response contract:
 Return JSON with these keys:

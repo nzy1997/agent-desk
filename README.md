@@ -14,7 +14,7 @@ This MVP uses only the Python standard library plus local command-line tools:
 - Scan configured repositories for `agent:ready` issues.
 - Queue configured repositories' `agent:ready` issues without starting workers automatically.
 - Start workers only after a human clicks `Run`.
-- Support multiple configured repositories in one manual queue.
+- Support multiple configured repositories in one manual queue with workspace-specific run settings.
 - Create a Git worktree and branch for each run.
 - Run `codex exec` non-interactively with the fixed Superpowers-to-PR protocol.
 - Save `prompt.md`, `stdout.jsonl`, `stderr.log`, `result.json`, `codex-resume.txt`, and command logs per run.
@@ -51,22 +51,40 @@ Add one `[[repos]]` block per repository:
 
 ```toml
 [agent_desk]
-max_concurrent_runs = 3
 
 [[repos]]
 name = "OWNER/FIRST"
 local_path = "/absolute/path/to/first"
 base_branch = "main"
 test_command = "python -m unittest"
+auto_start_ready = false
+max_concurrent_runs = 1
+requires_human_review = true
 
 [[repos]]
 name = "OWNER/SECOND"
 local_path = "/absolute/path/to/second"
 base_branch = "main"
 test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
+auto_start_ready = false
+max_concurrent_runs = 1
+requires_human_review = true
 ```
 
-The concurrency limit is global. If it is set to `3`, Agent Desk can run three Codex CLI workers at the same time across all repositories. Discovery can queue issues from every configured repository, but workers only start when a human clicks `Run` or invokes `run-next`.
+Run settings are workspace-specific. Each repository folder defaults to manual
+start, one active worker, and human review before closeout:
+
+```toml
+auto_start_ready = false
+max_concurrent_runs = 1
+requires_human_review = true
+single_closeout_per_workspace = true
+```
+
+Discovery can queue issues from every configured repository, but workers only
+start when a human clicks `Run` or invokes `run-next` unless
+`auto_start_ready` is enabled for that workspace. The dashboard Settings panel
+edits the currently selected folder rather than a global scheduler pool.
 
 Start low. Each active issue means one `codex exec` process plus whatever tests that worker runs.
 

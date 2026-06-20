@@ -29,6 +29,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Parser drops escaped commas.", prompt)
         self.assertIn("python -m unittest", prompt)
         self.assertIn("agent/issue-7-fix-flaky-parser", prompt)
+        self.assertIn("Read the relevant issue and pull request context before making changes", prompt)
 
     def test_prompt_drives_superpowers_flow_with_recommended_answers(self):
         repo = RepoConfig(
