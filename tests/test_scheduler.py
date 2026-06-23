@@ -205,7 +205,7 @@ class SchedulerTests(unittest.TestCase):
             with self.assertRaises(KeyError):
                 scheduler.list_repo_issues("octo/missing")
 
-    def test_mark_issue_ready_adds_label_and_queues_run(self):
+    def test_mark_issue_ready_queues_run_without_touching_github_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / "desk.sqlite")
@@ -215,12 +215,13 @@ class SchedulerTests(unittest.TestCase):
             )
             github = RecordingGitHub()
             scheduler = NoopScheduler(config, store, github=github)
+            scheduler.sync_repo_issues("octo/one")
 
             result = scheduler.mark_issue_ready("octo/one", 1)
 
             self.assertTrue(result.started)
-            self.assertEqual(github.added_labels, [("octo/one", 1, "agent:ready")])
-            self.assertIsNotNone(result.run_id)
+            # Adding to the desk is a pure local file move; no label is written.
+            self.assertEqual(github.added_labels, [])
             run = store.get_run(result.run_id)
             self.assertEqual(run["issue_number"], 1)
             self.assertEqual(run["state"], "ready")
@@ -242,23 +243,6 @@ class SchedulerTests(unittest.TestCase):
             self.assertIn("not a configured repository", result.message)
             self.assertEqual(github.added_labels, [])
             self.assertEqual(store.list_runs(), [])
-
-    def test_mark_issue_ready_tolerates_label_failure(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            store = Store(root / "desk.sqlite")
-            config = AgentDeskConfig(
-                data_dir=root / "data",
-                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
-            )
-            github = RecordingGitHub(add_label_error=RuntimeError("label not found"))
-            scheduler = NoopScheduler(config, store, github=github)
-
-            result = scheduler.mark_issue_ready("octo/one", 1)
-
-            # Desk state is folder-driven; the cosmetic label failure must not block it.
-            self.assertTrue(result.started)
-            self.assertEqual([run["state"] for run in store.list_runs()], ["ready"])
 
     def test_start_run_claims_ready_issue_after_human_click(self):
         with tempfile.TemporaryDirectory() as tmp:

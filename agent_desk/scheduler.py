@@ -185,9 +185,8 @@ class Scheduler:
     def mark_issue_ready(self, repo_name: str, issue_number: int) -> RunNextResult:
         """Move a synced issue onto the desk (available -> ready) on disk.
 
-        Desk state is folder-driven, so this is the source of truth. The
-        ``agent:ready`` GitHub label is written best-effort for visibility only;
-        a label failure does not block the add.
+        Desk state is folder-driven, so this is a pure local file move with no
+        GitHub call — the ``agent:ready`` label is no longer written.
         """
         with self._lock:
             repo = self._repo_by_name(repo_name)
@@ -195,7 +194,6 @@ class Scheduler:
                 return RunNextResult(False, f"{repo_name} is not a configured repository")
             open_run = self.store.find_open_run(repo.name, issue_number)
             if open_run is not None:
-                self._label_best_effort(repo, issue_number)
                 return RunNextResult(True, f"{repo.name}#{issue_number} is already on the desk", open_run["id"])
             record = self.store.get_record(repo.name, issue_number)
             if record is not None and record["state"] == "available":
@@ -203,7 +201,6 @@ class Scheduler:
             else:
                 issue = record or self._fetch_issue(repo, issue_number)
                 run_id = self._create_ready_run(repo, issue_number, issue)
-            self._label_best_effort(repo, issue_number)
             return RunNextResult(True, f"Added {repo.name}#{issue_number} to the desk", run_id)
 
     def _fetch_issue(self, repo: RepoConfig, issue_number: int) -> dict:
@@ -211,12 +208,6 @@ class Scheduler:
             return self.github.get_issue(repo.name, issue_number)
         except RuntimeError:
             return {"number": issue_number}
-
-    def _label_best_effort(self, repo: RepoConfig, issue_number: int) -> None:
-        try:
-            self.github.add_label(repo.name, issue_number, repo.ready_label)
-        except RuntimeError:
-            pass
 
     def _promote_to_ready(self, repo: RepoConfig, record: dict) -> int:
         number = int(record["issue_number"])

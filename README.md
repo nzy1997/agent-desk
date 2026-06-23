@@ -59,9 +59,9 @@ pull the repository's open issues from GitHub onto local disk (the `available/`
 folder) — this is the only GitHub read. The picker then lists issues **from
 disk**; click an issue title to expand its full body. Tick the ones you want and
 click **Add selected** to move them onto the desk (`available/ → ready/`). Issues
-already on the desk show an "on desk" badge with a disabled checkbox. Adding
-writes the `agent:ready` label to GitHub best-effort for visibility, but desk
-state is driven by the on-disk folders, not the label.
+already on the desk show an "on desk" badge with a disabled checkbox. Adding is a
+pure local file move — it makes no GitHub call and does not change issue labels;
+desk state is driven entirely by the on-disk folders.
 
 ## Adding Repositories
 
