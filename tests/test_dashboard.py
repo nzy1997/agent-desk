@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
-from agent_desk.dashboard import HTML, build_state_payload, serve_dashboard
+from agent_desk.dashboard import HTML, build_state_payload, run_viewer_html, serve_dashboard
 from agent_desk.scheduler import Scheduler
 from agent_desk.store import Store
 
@@ -134,7 +134,16 @@ class DashboardTests(unittest.TestCase):
 
     def test_dashboard_html_renders_log_links(self):
         self.assertIn("logLinks(run)", HTML)
-        self.assertIn("/api/run/${run.id}/file?name=", HTML)
+        self.assertIn("/api/run/${run.id}/${action}?name=", HTML)
+        # .jsonl logs open the terminal-style viewer; other files open raw.
+        self.assertIn("name.endsWith('.jsonl') ? 'view' : 'file'", HTML)
+
+    def test_run_viewer_html_embeds_raw_file_url_and_live_poll(self):
+        html = run_viewer_html(7, "stdout.jsonl")
+        self.assertIn("/api/run/7/file?name=stdout.jsonl", html)
+        self.assertIn("stdout.jsonl — run #7", html)
+        self.assertIn("JSON.parse", html)
+        self.assertIn("setInterval(tick", html)
 
     def test_state_payload_includes_resume_command_from_stored_thread_id(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,6 +463,34 @@ class IssuePickerRouteTests(unittest.TestCase):
             self.assertEqual(self._request(port, "/api/issues?repo=octo/missing")[0], 404)
             self.assertEqual(self._request(port, "/api/actions/sync-issues", {})[0], 400)
             self.assertEqual(self._request(port, "/api/actions/sync-issues", {"repo": "octo/missing"})[0], 404)
+
+    def test_run_view_route_renders_viewer_and_file_route_serves_raw(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, scheduler = self._build(tmp)
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "stdout.jsonl").write_text(
+                '{"type":"thread.started","thread_id":"t1"}\n', encoding="utf-8"
+            )
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=1,
+                issue_title="t",
+                issue_url="u",
+                branch_name="b",
+            )
+            store.update_run(run_id, run_dir=str(run_dir))
+            port = self._serve(store, scheduler)
+
+            url = f"http://{self.host}:{port}/api/run/{run_id}/view?name=stdout.jsonl"
+            with urllib.request.urlopen(url, timeout=5) as response:
+                body = response.read().decode("utf-8")
+                self.assertEqual(response.headers.get_content_type(), "text/html")
+            self.assertIn(f"/api/run/{run_id}/file?name=stdout.jsonl", body)
+
+            raw_url = f"http://{self.host}:{port}/api/run/{run_id}/file?name=stdout.jsonl"
+            with urllib.request.urlopen(raw_url, timeout=5) as response:
+                self.assertIn("thread.started", response.read().decode("utf-8"))
 
     def test_include_issues_batch_route_adds_selected(self):
         with tempfile.TemporaryDirectory() as tmp:

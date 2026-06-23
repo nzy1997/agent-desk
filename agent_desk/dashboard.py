@@ -161,6 +161,9 @@ def make_handler(
             if path.startswith("/api/run/") and path.endswith("/file"):
                 self._send_run_file(path)
                 return
+            if path.startswith("/api/run/") and path.endswith("/view"):
+                self._send_run_viewer(path)
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
@@ -371,6 +374,23 @@ def make_handler(
                 return
             self._send_text(candidate.read_text(encoding="utf-8", errors="replace"))
 
+        def _send_run_viewer(self, path: str) -> None:
+            parts = path.split("/")
+            if len(parts) < 5:
+                self.send_error(HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                run_id = int(parts[3])
+                store.get_run(run_id)
+            except (ValueError, KeyError):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            requested = parse_qs(urlparse(self.path).query).get("name", [""])[0]
+            if requested not in set(LOG_FILE_ORDER):
+                self.send_error(HTTPStatus.BAD_REQUEST, "file not allowed")
+                return
+            self._send_text(run_viewer_html(run_id, requested), "text/html; charset=utf-8")
+
         def _send_fs_listing(self) -> None:
             query = parse_qs(urlparse(self.path).query)
             requested = query.get("path", [""])[0]
@@ -442,6 +462,116 @@ def serve_dashboard(
         server.serve_forever()
     finally:
         server.server_close()
+
+
+def run_viewer_html(run_id: int, name: str) -> str:
+    """A terminal-style, auto-refreshing viewer for a run's ``.jsonl`` log.
+
+    The page polls the raw file endpoint, parses each JSON line, and renders it
+    readably; ``run_id``/``name`` are caller-validated so they are safe to embed.
+    """
+    file_url = f"/api/run/{run_id}/file?name={name}"
+    return VIEWER_HTML.replace("__FILE_URL__", file_url).replace(
+        "__TITLE__", f"{name} — run #{run_id}"
+    )
+
+
+VIEWER_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: #0b0e14;
+      color: #d7dce5;
+      font: 12.5px/1.5 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 8px 12px;
+      border-bottom: 1px solid #1d2230;
+      color: #9aa4b2;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      background: #0b0e14;
+    }
+    header .live { color: #56d364; }
+    header .live.stale { color: #7d8694; }
+    #view { flex: 1; overflow: auto; padding: 10px 12px; }
+    .ev { display: flex; gap: 8px; padding: 1px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .ev .ty { color: #6cb6ff; flex: 0 0 auto; }
+    .ev .tx { color: #d7dce5; }
+    .ev.raw { color: #8b98a9; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>__TITLE__</strong>
+    <span id="live" class="live">● live</span>
+    <span style="margin-left:auto;color:#5c6470">auto-refreshing</span>
+  </header>
+  <div id="view"></div>
+  <script>
+    const FILE_URL = "__FILE_URL__";
+    const view = document.getElementById('view');
+    const live = document.getElementById('live');
+    let last = null;
+    function esc(s) {
+      return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    }
+    function extractText(o, depth) {
+      if (depth > 4 || o == null) return '';
+      for (const k of ['text','message','content','delta','reasoning','output','stdout','command']) {
+        const v = o[k];
+        if (typeof v === 'string' && v.trim()) return v;
+        if (v && typeof v === 'object') { const t = extractText(v, depth + 1); if (t) return t; }
+      }
+      return '';
+    }
+    function render(raw) {
+      const atBottom = Math.abs(view.scrollHeight - view.clientHeight - view.scrollTop) < 40;
+      const html = raw.split('\\n').map(line => {
+        line = line.trim();
+        if (!line) return '';
+        let o;
+        try { o = JSON.parse(line); } catch (e) { return `<div class="ev raw">${esc(line)}</div>`; }
+        if (o && typeof o === 'object' && !Array.isArray(o)) {
+          const type = o.type || (o.msg && o.msg.type) || 'event';
+          let text = extractText(o, 0);
+          if (!text) { const rest = {...o}; delete rest.type; text = JSON.stringify(rest); }
+          return `<div class="ev"><span class="ty">${esc(type)}</span><span class="tx">${esc(text)}</span></div>`;
+        }
+        return `<div class="ev raw">${esc(line)}</div>`;
+      }).join('');
+      view.innerHTML = html || '<div class="ev raw">(empty)</div>';
+      if (atBottom) view.scrollTop = view.scrollHeight;
+    }
+    async function tick() {
+      try {
+        const res = await fetch(FILE_URL, { cache: 'no-store' });
+        if (!res.ok) throw new Error(res.status);
+        const raw = await res.text();
+        if (raw !== last) { last = raw; render(raw); }
+        live.textContent = '● live';
+        live.className = 'live';
+      } catch (e) {
+        live.textContent = '● disconnected';
+        live.className = 'live stale';
+      }
+    }
+    tick();
+    setInterval(tick, 1500);
+  </script>
+</body>
+</html>
+"""
 
 
 HTML = """<!doctype html>
@@ -1104,7 +1234,8 @@ HTML = """<!doctype html>
       const files = run.log_files || [];
       if (!files.length) return '';
       const links = files.map(name => {
-        const href = `/api/run/${run.id}/file?name=${encodeURIComponent(name)}`;
+        const action = name.endsWith('.jsonl') ? 'view' : 'file';
+        const href = `/api/run/${run.id}/${action}?name=${encodeURIComponent(name)}`;
         return `<a href="${href}" target="_blank" rel="noopener">${esc(name)}</a>`;
       }).join('');
       return `<div class="log-links">${links}</div>`;
