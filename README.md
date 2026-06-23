@@ -50,6 +50,34 @@ The scheduler polls GitHub and queues ready issues as local `ready` runs. It
 does not start Codex workers by itself. Use the dashboard `Run` button, or
 `run-next`, to start one queued issue.
 
+To pull an issue onto the desk without leaving the dashboard, use the **Add to
+desk** control in the Queue panel: pick a configured repository, enter the issue
+number, and click. This adds the repository's `ready_label` (`agent:ready`) to
+the issue and queues it immediately. Because it is an explicit manual action, it
+writes the label even when `mutate_github = false` — that flag only gates the
+automatic label changes made during the worker loop.
+
+## Adding Repositories
+
+You can register a repository three ways:
+
+- **Dashboard — clone:** enter `OWNER/REPO` (or a GitHub URL) and click
+  `Clone & add`. The repo is cloned with `gh repo clone` into
+  `clone_root/OWNER/REPO` and registered automatically.
+- **Dashboard — existing folder:** click `Browse…` to pick a local folder from a
+  built-in directory browser (git repos are marked), or type the path and click
+  `Add folder`.
+- **CLI:** `agent-desk add-repo --path /abs/path/to/clone` for an existing clone,
+  or `agent-desk add-repo --clone OWNER/REPO` to clone then register.
+
+Cloned repositories are stored under `clone_root` (default
+`~/.agent-desk/repos`), configurable in the `[agent_desk]` section:
+
+```toml
+[agent_desk]
+clone_root = "~/.agent-desk/repos"
+```
+
 ## Multiple Repositories And Concurrency
 
 Add one `[[repos]]` block per repository:

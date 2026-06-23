@@ -32,6 +32,20 @@ class FakeGitHub:
         raise AssertionError("label mutation should be disabled in this test")
 
 
+class RecordingGitHub(FakeGitHub):
+    """FakeGitHub that records label writes instead of rejecting them."""
+
+    def __init__(self, add_label_error: Exception | None = None):
+        super().__init__()
+        self.added_labels = []
+        self._add_label_error = add_label_error
+
+    def add_label(self, repo, issue_number, label):
+        if self._add_label_error is not None:
+            raise self._add_label_error
+        self.added_labels.append((repo, issue_number, label))
+
+
 class NoopScheduler(Scheduler):
     def _run_worker_for_issue(self, **kwargs):
         return None
@@ -124,6 +138,61 @@ class SchedulerTests(unittest.TestCase):
             issues_by_run_order = [run["issue_number"] for run in reversed(store.list_runs())]
             self.assertEqual(issues_by_run_order, [1, 2, 3, 4])
             self.assertEqual(scheduler.run_available(), [])
+
+    def test_mark_issue_ready_adds_label_and_queues_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = RecordingGitHub()
+            scheduler = NoopScheduler(config, store, github=github)
+
+            result = scheduler.mark_issue_ready("octo/one", 1)
+
+            self.assertTrue(result.started)
+            self.assertEqual(github.added_labels, [("octo/one", 1, "agent:ready")])
+            self.assertIsNotNone(result.run_id)
+            run = store.get_run(result.run_id)
+            self.assertEqual(run["issue_number"], 1)
+            self.assertEqual(run["state"], "ready")
+
+    def test_mark_issue_ready_rejects_unconfigured_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = RecordingGitHub()
+            scheduler = NoopScheduler(config, store, github=github)
+
+            result = scheduler.mark_issue_ready("octo/missing", 7)
+
+            self.assertFalse(result.started)
+            self.assertIn("not a configured repository", result.message)
+            self.assertEqual(github.added_labels, [])
+            self.assertEqual(store.list_runs(), [])
+
+    def test_mark_issue_ready_reports_github_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = RecordingGitHub(add_label_error=RuntimeError("label not found"))
+            scheduler = NoopScheduler(config, store, github=github)
+
+            result = scheduler.mark_issue_ready("octo/one", 1)
+
+            self.assertFalse(result.started)
+            self.assertIn("label not found", result.message)
+            self.assertEqual(store.list_runs(), [])
 
     def test_start_run_claims_ready_issue_after_human_click(self):
         with tempfile.TemporaryDirectory() as tmp:

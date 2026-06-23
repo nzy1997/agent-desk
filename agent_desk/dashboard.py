@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import errno
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from .config import add_project_to_config, load_config
+from .config import add_project_to_config, add_remote_repo_to_config, load_config
 from .continuation import ContinuationRunner
 from .scheduler import Scheduler
 from .store import Store
@@ -135,6 +136,9 @@ def make_handler(
             if path == "/api/state":
                 self._send_json(build_state_payload(store, scheduler))
                 return
+            if path == "/api/fs":
+                self._send_fs_listing()
+                return
             if path.startswith("/api/run/") and path.endswith("/file"):
                 self._send_run_file(path)
                 return
@@ -147,6 +151,22 @@ def make_handler(
             path = urlparse(self.path).path
             if path == "/api/actions/run-next":
                 self._send_json(scheduler.run_next().__dict__)
+                return
+            if path == "/api/actions/include-issue":
+                payload = self._read_json()
+                repo_name = str(payload.get("repo") or "").strip()
+                if not repo_name:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                try:
+                    issue_number = int(payload.get("issue"))
+                except (TypeError, ValueError):
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issue must be a number")
+                    return
+                if issue_number <= 0:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issue must be a positive number")
+                    return
+                self._send_json(scheduler.mark_issue_ready(repo_name, issue_number).__dict__)
                 return
             if path.startswith("/api/run/") and path.endswith("/start"):
                 run_id = int(path.split("/")[3])
@@ -177,6 +197,23 @@ def make_handler(
                     return
                 try:
                     repo = add_project_to_config(config_path, folder)
+                    scheduler.config = load_config(config_path)
+                    scheduler.worker.config = scheduler.config
+                except ValueError as exc:
+                    self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                self._send_json({"ok": True, "repo": {"name": repo.name, "path": str(repo.local_path)}})
+                return
+            if path == "/api/projects/clone":
+                if not config_path or not scheduler:
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "config path unavailable")
+                    return
+                spec = str(self._read_json().get("repo") or "").strip()
+                if not spec:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                try:
+                    repo = add_remote_repo_to_config(config_path, spec)
                     scheduler.config = load_config(config_path)
                     scheduler.worker.config = scheduler.config
                 except ValueError as exc:
@@ -272,6 +309,37 @@ def make_handler(
                 return
             self._send_text(candidate.read_text(encoding="utf-8", errors="replace"))
 
+        def _send_fs_listing(self) -> None:
+            query = parse_qs(urlparse(self.path).query)
+            requested = query.get("path", [""])[0]
+            base = Path(requested).expanduser() if requested else Path.home()
+            try:
+                base = base.resolve()
+            except OSError:
+                self.send_error(HTTPStatus.BAD_REQUEST, "invalid path")
+                return
+            if not base.is_dir():
+                self.send_error(HTTPStatus.BAD_REQUEST, "not a directory")
+                return
+            entries = []
+            try:
+                children = sorted(base.iterdir(), key=lambda item: item.name.lower())
+            except OSError as exc:
+                self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            for child in children:
+                if child.name.startswith(".") or not child.is_dir():
+                    continue
+                entries.append(
+                    {
+                        "name": child.name,
+                        "path": str(child),
+                        "is_git": (child / ".git").exists(),
+                    }
+                )
+            parent = str(base.parent) if base.parent != base else None
+            self._send_json({"path": str(base), "parent": parent, "entries": entries})
+
     return Handler
 
 
@@ -281,8 +349,33 @@ def serve_dashboard(
     store: Store,
     scheduler: Scheduler | None = None,
     config_path: Path | None = None,
+    port_attempts: int = 20,
+    on_serving: Callable[[str, int], None] | None = None,
 ) -> None:
-    server = ThreadingHTTPServer((host, port), make_handler(store, scheduler, config_path))
+    """Serve the dashboard, auto-incrementing the port if it is already in use.
+
+    Binding is attempted on ``port``, ``port + 1``, ... up to ``port_attempts``
+    candidates. ``on_serving`` is invoked with the host and the port that was
+    actually bound, so callers can report the real URL.
+    """
+    handler = make_handler(store, scheduler, config_path)
+    server = None
+    last_error: OSError | None = None
+    for candidate in range(port, port + port_attempts):
+        try:
+            server = ThreadingHTTPServer((host, candidate), handler)
+            break
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+            last_error = error
+    if server is None:
+        raise OSError(
+            errno.EADDRINUSE,
+            f"no free port in range {port}..{port + port_attempts - 1} on {host}",
+        ) from last_error
+    if on_serving is not None:
+        on_serving(host, server.server_address[1])
     try:
         server.serve_forever()
     finally:
@@ -497,6 +590,34 @@ HTML = """<!doctype html>
       max-height: 300px;
       overflow: auto;
     }
+    .project-form-buttons { display: flex; gap: 8px; }
+    .project-form-buttons button { flex: 1; }
+    .fs-browser {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      margin-bottom: 16px;
+      max-height: 260px;
+      overflow: auto;
+    }
+    .fs-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+    .fs-head code { flex: 1; overflow-wrap: anywhere; }
+    .fs-list { list-style: none; margin: 0; padding: 0; }
+    .fs-list li { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+    .fs-dir { flex: 1; text-align: left; }
+    .git-badge {
+      font-size: 11px;
+      color: #16a34a;
+      border: 1px solid #16a34a;
+      border-radius: 4px;
+      padding: 0 4px;
+    }
     @media (max-width: 900px) {
       main { grid-template-columns: 1fr; }
       section { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -519,9 +640,22 @@ HTML = """<!doctype html>
     <section>
       <h2>Queue</h2>
       <div class="project-form">
-        <input id="project-path" placeholder="/path/to/project">
-        <button onclick="addProject()">Add project</button>
+        <select id="include-repo" title="Configured repository"></select>
+        <input id="include-issue" type="number" min="1" step="1" placeholder="Issue #">
+        <button onclick="includeIssue()">Add to desk</button>
       </div>
+      <div class="project-form">
+        <input id="clone-spec" placeholder="OWNER/REPO or GitHub URL to clone">
+        <button onclick="cloneProject()">Clone &amp; add</button>
+      </div>
+      <div class="project-form">
+        <input id="project-path" placeholder="/path/to/existing/clone">
+        <div class="project-form-buttons">
+          <button onclick="addProject()">Add folder</button>
+          <button onclick="toggleBrowser()">Browse&hellip;</button>
+        </div>
+      </div>
+      <div id="fs-browser" class="fs-browser" style="display:none"></div>
       <div class="settings-panel">
         <div class="section-head">
           <h2>Workspace Settings</h2>
@@ -586,6 +720,10 @@ HTML = """<!doctype html>
     async function copyResume(command) {
       await navigator.clipboard.writeText(command);
     }
+    function closeBrowser() {
+      const panel = document.getElementById('fs-browser');
+      if (panel) panel.style.display = 'none';
+    }
     async function addProject() {
       const input = document.getElementById('project-path');
       const path = input.value.trim();
@@ -593,9 +731,88 @@ HTML = """<!doctype html>
       try {
         await postJson('/api/projects', { path });
         input.value = '';
+        closeBrowser();
       } catch (error) {
         alert(error.message || String(error));
       }
+    }
+    async function cloneProject() {
+      const input = document.getElementById('clone-spec');
+      const repo = input.value.trim();
+      if (!repo) return;
+      try {
+        await postJson('/api/projects/clone', { repo });
+        input.value = '';
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    }
+    function renderIncludeRepos(state) {
+      const select = document.getElementById('include-repo');
+      if (!select) return;
+      const projects = state.projects || [];
+      const current = select.value;
+      select.innerHTML = projects.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+      if (current && projects.some(p => p.name === current)) select.value = current;
+    }
+    async function includeIssue() {
+      const repo = document.getElementById('include-repo').value;
+      const issueInput = document.getElementById('include-issue');
+      const issue = parseInt(issueInput.value, 10);
+      if (!repo) { alert('Select a configured repository first'); return; }
+      if (!Number.isInteger(issue) || issue <= 0) { alert('Enter a valid issue number'); return; }
+      try {
+        const res = await fetch('/api/actions/include-issue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo, issue })
+        });
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok || result.started === false) {
+          alert(result.message || 'Could not add the issue to the desk');
+        } else {
+          issueInput.value = '';
+        }
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+      await refresh();
+    }
+    async function toggleBrowser() {
+      const panel = document.getElementById('fs-browser');
+      if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        await browseTo('');
+      } else {
+        panel.style.display = 'none';
+      }
+    }
+    async function browseTo(path) {
+      const res = await fetch('/api/fs?path=' + encodeURIComponent(path || ''));
+      if (!res.ok) { alert(await res.text()); return; }
+      renderBrowser(await res.json());
+    }
+    function renderBrowser(data) {
+      const panel = document.getElementById('fs-browser');
+      const up = data.parent
+        ? `<button onclick="browseTo(${jsString(data.parent)})">&uarr; Up</button>`
+        : '';
+      const rows = (data.entries || []).map(entry => `
+        <li>
+          <button class="fs-dir" onclick="browseTo(${jsString(entry.path)})">${esc(entry.name)}${entry.is_git ? ' <span class="git-badge">git</span>' : ''}</button>
+          <button onclick="selectFolder(${jsString(entry.path)})">Select</button>
+        </li>`).join('') || '<li class="muted">No subfolders</li>';
+      panel.innerHTML = `
+        <div class="fs-head">
+          ${up}
+          <code>${esc(data.path)}</code>
+          <button class="primary" onclick="selectFolder(${jsString(data.path)})">Add this folder</button>
+        </div>
+        <ul class="fs-list">${rows}</ul>`;
+    }
+    async function selectFolder(path) {
+      document.getElementById('project-path').value = path;
+      await addProject();
     }
     function markSettingsDirty() {
       settingsDirty = true;
@@ -780,6 +997,7 @@ HTML = """<!doctype html>
       const stats = state.stats || {};
       document.getElementById('health').textContent = `${state.scheduler.paused ? 'Paused' : 'Active'} · ${Object.values(stats).reduce((a,b) => a + b, 0)} runs tracked`;
       renderSettings(state);
+      renderIncludeRepos(state);
       document.getElementById('stats').innerHTML = Object.entries(stats).sort().map(([key, value]) =>
         `<div class="metric-row"><span>${esc(key)}</span><strong>${value}</strong></div>`
       ).join('') || '<div class="muted">No runs yet</div>';

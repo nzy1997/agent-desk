@@ -1,12 +1,24 @@
 import json
+import socket
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
-from agent_desk.dashboard import HTML, build_state_payload
+from agent_desk.dashboard import HTML, build_state_payload, serve_dashboard
 from agent_desk.scheduler import Scheduler
 from agent_desk.store import Store
+
+
+class _IncludeIssueGitHub:
+    def list_ready_issues(self, repo, label, limit=10):
+        return [{"number": 5, "title": "Wire it up", "body": "do", "url": "https://example.test/5"}]
+
+    def add_label(self, repo, issue_number, label):
+        self.added = (repo, issue_number, label)
 
 
 class DashboardTests(unittest.TestCase):
@@ -257,6 +269,13 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("selectProjectByPath(this)", HTML)
         self.assertIn("Back to folders", HTML)
 
+    def test_dashboard_html_renders_include_issue_control(self):
+        self.assertIn("include-repo", HTML)
+        self.assertIn("include-issue", HTML)
+        self.assertIn("includeIssue()", HTML)
+        self.assertIn("/api/actions/include-issue", HTML)
+        self.assertIn("renderIncludeRepos(state)", HTML)
+
     def test_dashboard_html_renders_workspace_settings_controls(self):
         self.assertIn("/api/settings", HTML)
         self.assertIn("workspace_path", HTML)
@@ -266,6 +285,120 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("requires-human-review", HTML)
         self.assertIn("single-closeout-per-workspace", HTML)
         self.assertIn("saveSettings()", HTML)
+
+
+class ServeDashboardPortTests(unittest.TestCase):
+    def test_serve_dashboard_auto_increments_when_port_busy(self):
+        host = "127.0.0.1"
+        # Occupy the preferred port so serve_dashboard must move to the next one.
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind((host, 0))
+        busy_port = blocker.getsockname()[1]
+        blocker.listen(1)
+        bound: dict[str, int] = {}
+        ready = threading.Event()
+
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = Store(Path(tmp) / "desk.sqlite")
+
+                def on_serving(_host: str, port: int) -> None:
+                    bound["port"] = port
+                    ready.set()
+
+                thread = threading.Thread(
+                    target=serve_dashboard,
+                    kwargs={
+                        "host": host,
+                        "port": busy_port,
+                        "store": store,
+                        "on_serving": on_serving,
+                    },
+                    daemon=True,
+                )
+                thread.start()
+                self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+                self.assertNotEqual(bound["port"], busy_port)
+                self.assertGreater(bound["port"], busy_port)
+                with urllib.request.urlopen(
+                    f"http://{host}:{bound['port']}/api/state", timeout=5
+                ) as response:
+                    payload = json.loads(response.read())
+                self.assertEqual(payload["app"], "Agent Desk")
+        finally:
+            blocker.close()
+
+    def test_serve_dashboard_raises_when_no_port_free(self):
+        host = "127.0.0.1"
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind((host, 0))
+        busy_port = blocker.getsockname()[1]
+        blocker.listen(1)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = Store(Path(tmp) / "desk.sqlite")
+                with self.assertRaises(OSError):
+                    serve_dashboard(host, busy_port, store, port_attempts=1)
+        finally:
+            blocker.close()
+
+
+class IncludeIssueRouteTests(unittest.TestCase):
+    def _post(self, host, port, body):
+        request = urllib.request.Request(
+            f"http://{host}:{port}/api/actions/include-issue",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, None
+
+    def test_include_issue_route_labels_and_queues(self):
+        host = "127.0.0.1"
+        bound: dict[str, int] = {}
+        ready = threading.Event()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/example", local_path=root / "example")],
+            )
+            scheduler = Scheduler(config, store, github=_IncludeIssueGitHub())
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "scheduler": scheduler,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+            port = bound["port"]
+
+            status, payload = self._post(host, port, {"repo": "octo/example", "issue": 5})
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["started"])
+
+            self.assertEqual([run["issue_number"] for run in store.list_runs()], [5])
+
+            bad_repo_status, _ = self._post(host, port, {"issue": 5})
+            self.assertEqual(bad_repo_status, 400)
+            bad_issue_status, _ = self._post(host, port, {"repo": "octo/example", "issue": "abc"})
+            self.assertEqual(bad_issue_status, 400)
+            nonpositive_status, _ = self._post(host, port, {"repo": "octo/example", "issue": 0})
+            self.assertEqual(nonpositive_status, 400)
 
 
 if __name__ == "__main__":

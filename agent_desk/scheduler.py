@@ -152,6 +152,31 @@ class Scheduler:
                     results.append(self._queue_issue(repo, issue))
         return results
 
+    def mark_issue_ready(self, repo_name: str, issue_number: int) -> RunNextResult:
+        """Add the ready label to a GitHub issue and queue it on the desk.
+
+        This is an explicit, human-initiated action, so it writes the label even
+        when ``mutate_github`` is disabled for the repository. That gate only
+        governs the automatic label changes Agent Desk makes during the worker
+        loop, not deliberate clicks that pull an issue onto the desk.
+        """
+        with self._lock:
+            repo = self._repo_by_name(repo_name)
+            if repo is None:
+                return RunNextResult(False, f"{repo_name} is not a configured repository")
+            try:
+                self.github.add_label(repo.name, issue_number, repo.ready_label)
+            except RuntimeError as exc:
+                return RunNextResult(
+                    False, f"Could not add {repo.ready_label} to {repo.name}#{issue_number}: {exc}"
+                )
+            run_id = None
+            for issue in self._ready_issues(repo):
+                if int(issue["number"]) == issue_number:
+                    run_id = self._queue_issue(repo, issue).run_id
+                    break
+            return RunNextResult(True, f"Added {repo.ready_label} to {repo.name}#{issue_number}", run_id)
+
     def run_next(self) -> RunNextResult:
         with self._lock:
             if self._paused:
@@ -315,6 +340,13 @@ class Scheduler:
             if repo.name == run["repo_name"]:
                 return repo
         raise KeyError(f"repository {run['repo_name']} is not configured")
+
+    def _repo_by_name(self, repo_name: str) -> RepoConfig | None:
+        target = (repo_name or "").strip()
+        for repo in self.config.repos:
+            if repo.name == target:
+                return repo
+        return None
 
     def _workspace_key(self, repo: RepoConfig) -> Path:
         return repo.local_path.expanduser().resolve()
