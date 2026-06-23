@@ -134,48 +134,117 @@ class Scheduler:
 
     def poll_once(self) -> list[RunNextResult]:
         results = []
-        results.extend(self.discover_ready())
         results.extend(self.auto_start_ready_runs())
         results.extend(self.monitor_prs())
         return results
 
-    def run_available(self) -> list[RunNextResult]:
-        return self.discover_ready()
+    def sync_repo_issues(self, repo_name: str, limit: int = 200) -> list[dict]:
+        """Pull open issues from GitHub into the on-disk ``available`` folder.
 
-    def discover_ready(self) -> list[RunNextResult]:
-        results: list[RunNextResult] = []
+        This is the only GitHub read for issue intake. Issues that already have a
+        record (available or a run, in any state) are left untouched. Returns the
+        repo's issue picker view (read from disk).
+        """
+        repo = self._repo_by_name(repo_name)
+        if repo is None:
+            raise KeyError(f"repository {repo_name} is not configured")
+        issues = self.github.list_open_issues(repo.name, limit=limit)
         with self._lock:
-            if self._paused:
-                return []
-            for repo in self.config.repos:
-                for issue in self._ready_issues(repo):
-                    results.append(self._queue_issue(repo, issue))
-        return results
+            for issue in issues:
+                number = int(issue["number"])
+                if self.store.get_record(repo.name, number) is None:
+                    self.store.create_available(
+                        repo_name=repo.name,
+                        issue_number=number,
+                        issue_title=str(issue.get("title") or ""),
+                        issue_url=str(issue.get("url") or ""),
+                        issue_body=str(issue.get("body") or ""),
+                    )
+        return self.list_repo_issues(repo_name)
+
+    def list_repo_issues(self, repo_name: str) -> list[dict]:
+        """Return the repo's synced issues from disk (no GitHub call).
+
+        ``on_desk`` is true for any record that is no longer ``available`` —
+        i.e. it has been moved onto the desk as a run.
+        """
+        repo = self._repo_by_name(repo_name)
+        if repo is None:
+            raise KeyError(f"repository {repo_name} is not configured")
+        return [
+            {
+                "number": record["issue_number"],
+                "title": str(record.get("issue_title") or ""),
+                "body": str(record.get("issue_body") or ""),
+                "url": str(record.get("issue_url") or ""),
+                "on_desk": record["state"] != "available",
+            }
+            for record in self.store.list_records(repo.name)
+        ]
 
     def mark_issue_ready(self, repo_name: str, issue_number: int) -> RunNextResult:
-        """Add the ready label to a GitHub issue and queue it on the desk.
+        """Move a synced issue onto the desk (available -> ready) on disk.
 
-        This is an explicit, human-initiated action, so it writes the label even
-        when ``mutate_github`` is disabled for the repository. That gate only
-        governs the automatic label changes Agent Desk makes during the worker
-        loop, not deliberate clicks that pull an issue onto the desk.
+        Desk state is folder-driven, so this is the source of truth. The
+        ``agent:ready`` GitHub label is written best-effort for visibility only;
+        a label failure does not block the add.
         """
         with self._lock:
             repo = self._repo_by_name(repo_name)
             if repo is None:
                 return RunNextResult(False, f"{repo_name} is not a configured repository")
-            try:
-                self.github.add_label(repo.name, issue_number, repo.ready_label)
-            except RuntimeError as exc:
-                return RunNextResult(
-                    False, f"Could not add {repo.ready_label} to {repo.name}#{issue_number}: {exc}"
-                )
-            run_id = None
-            for issue in self._ready_issues(repo):
-                if int(issue["number"]) == issue_number:
-                    run_id = self._queue_issue(repo, issue).run_id
-                    break
-            return RunNextResult(True, f"Added {repo.ready_label} to {repo.name}#{issue_number}", run_id)
+            open_run = self.store.find_open_run(repo.name, issue_number)
+            if open_run is not None:
+                self._label_best_effort(repo, issue_number)
+                return RunNextResult(True, f"{repo.name}#{issue_number} is already on the desk", open_run["id"])
+            record = self.store.get_record(repo.name, issue_number)
+            if record is not None and record["state"] == "available":
+                run_id = self._promote_to_ready(repo, record)
+            else:
+                issue = record or self._fetch_issue(repo, issue_number)
+                run_id = self._create_ready_run(repo, issue_number, issue)
+            self._label_best_effort(repo, issue_number)
+            return RunNextResult(True, f"Added {repo.name}#{issue_number} to the desk", run_id)
+
+    def _fetch_issue(self, repo: RepoConfig, issue_number: int) -> dict:
+        try:
+            return self.github.get_issue(repo.name, issue_number)
+        except RuntimeError:
+            return {"number": issue_number}
+
+    def _label_best_effort(self, repo: RepoConfig, issue_number: int) -> None:
+        try:
+            self.github.add_label(repo.name, issue_number, repo.ready_label)
+        except RuntimeError:
+            pass
+
+    def _promote_to_ready(self, repo: RepoConfig, record: dict) -> int:
+        number = int(record["issue_number"])
+        title = str(record.get("issue_title") or f"Issue {number}")
+        branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
+        self.store.update_run(
+            record["id"], state="ready", stage="waiting for human run", branch_name=branch
+        )
+        self.store.add_event(record["id"], "info", "ready", "Issue is ready to run", {"repo": repo.name})
+        return record["id"]
+
+    def _create_ready_run(self, repo: RepoConfig, issue_number: int, issue: dict) -> int:
+        title = str(issue.get("issue_title") or issue.get("title") or f"Issue {issue_number}")
+        body = str(issue.get("issue_body") or issue.get("body") or "")
+        url = str(issue.get("issue_url") or issue.get("url") or "")
+        attempt = self.store.next_attempt(repo.name, issue_number)
+        branch = f"agent/issue-{issue_number}-{slugify(title)[:48]}-run-{attempt}"
+        run_id = self.store.create_run(
+            repo_name=repo.name,
+            issue_number=issue_number,
+            issue_title=title,
+            issue_url=url,
+            branch_name=branch,
+            issue_body=body,
+        )
+        self.store.update_run(run_id, state="ready", stage="waiting for human run")
+        self.store.add_event(run_id, "info", "ready", "Issue is ready to run", {"repo": repo.name})
+        return run_id
 
     def run_next(self) -> RunNextResult:
         with self._lock:
@@ -183,12 +252,7 @@ class Scheduler:
                 return RunNextResult(False, "Scheduler is paused")
             ready = self.store.list_runs({"ready"})
             if not ready:
-                for repo in self.config.repos:
-                    for issue in self._ready_issues(repo):
-                        self._queue_issue(repo, issue)
-                ready = self.store.list_runs({"ready"})
-            if not ready:
-                return RunNextResult(False, "No agent:ready issues found")
+                return RunNextResult(False, "No issues on the desk are ready")
             blocked_by_limit = False
             for run in reversed(ready):
                 try:
@@ -268,31 +332,6 @@ class Scheduler:
             if self._workspace_key(other_repo) == workspace:
                 count += 1
         return count
-
-    def _ready_issues(self, repo: RepoConfig) -> list[dict]:
-        issues = self.github.list_ready_issues(repo.name, repo.ready_label, limit=10)
-        return [
-            issue
-            for issue in issues
-            if not self.store.find_open_run(repo.name, int(issue["number"]))
-        ]
-
-    def _queue_issue(self, repo: RepoConfig, issue: dict) -> RunNextResult:
-        issue_number = int(issue["number"])
-        title = str(issue.get("title") or f"Issue {issue_number}")
-        attempt = self.store.next_attempt(repo.name, issue_number)
-        branch = f"agent/issue-{issue_number}-{slugify(title)[:48]}-run-{attempt}"
-        run_id = self.store.create_run(
-            repo_name=repo.name,
-            issue_number=issue_number,
-            issue_title=title,
-            issue_body=str(issue.get("body") or ""),
-            issue_url=str(issue.get("url") or ""),
-            branch_name=branch,
-        )
-        self.store.update_run(run_id, state="ready", stage="waiting for human run")
-        self.store.add_event(run_id, "info", "ready", "Issue is ready to run", {"repo": repo.name})
-        return RunNextResult(False, f"Queued issue #{issue_number}", run_id)
 
     def _start_ready_run(self, run_id: int) -> RunNextResult:
         run = self.store.get_run(run_id)

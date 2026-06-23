@@ -139,6 +139,25 @@ def make_handler(
             if path == "/api/fs":
                 self._send_fs_listing()
                 return
+            if path == "/api/issues":
+                if not scheduler:
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "scheduler disabled")
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                repo_name = (query.get("repo", [""])[0] or "").strip()
+                if not repo_name:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                try:
+                    issues = scheduler.list_repo_issues(repo_name)
+                except KeyError:
+                    self.send_error(HTTPStatus.NOT_FOUND, f"{repo_name} is not configured")
+                    return
+                except RuntimeError as exc:
+                    self.send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+                    return
+                self._send_json({"repo": repo_name, "issues": issues})
+                return
             if path.startswith("/api/run/") and path.endswith("/file"):
                 self._send_run_file(path)
                 return
@@ -151,6 +170,22 @@ def make_handler(
             path = urlparse(self.path).path
             if path == "/api/actions/run-next":
                 self._send_json(scheduler.run_next().__dict__)
+                return
+            if path == "/api/actions/sync-issues":
+                payload = self._read_json()
+                repo_name = str(payload.get("repo") or "").strip()
+                if not repo_name:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                try:
+                    issues = scheduler.sync_repo_issues(repo_name)
+                except KeyError:
+                    self.send_error(HTTPStatus.NOT_FOUND, f"{repo_name} is not configured")
+                    return
+                except RuntimeError as exc:
+                    self.send_error(HTTPStatus.BAD_GATEWAY, str(exc))
+                    return
+                self._send_json({"repo": repo_name, "issues": issues})
                 return
             if path == "/api/actions/include-issue":
                 payload = self._read_json()
@@ -167,6 +202,33 @@ def make_handler(
                     self.send_error(HTTPStatus.BAD_REQUEST, "issue must be a positive number")
                     return
                 self._send_json(scheduler.mark_issue_ready(repo_name, issue_number).__dict__)
+                return
+            if path == "/api/actions/include-issues":
+                payload = self._read_json()
+                repo_name = str(payload.get("repo") or "").strip()
+                if not repo_name:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                numbers = []
+                for raw in payload.get("issues") or []:
+                    try:
+                        number = int(raw)
+                    except (TypeError, ValueError):
+                        continue
+                    if number > 0 and number not in numbers:
+                        numbers.append(number)
+                if not numbers:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issues must be a non-empty list of numbers")
+                    return
+                results = [scheduler.mark_issue_ready(repo_name, number) for number in numbers]
+                added = sum(1 for result in results if result.started)
+                self._send_json(
+                    {
+                        "added": added,
+                        "requested": len(numbers),
+                        "results": [result.__dict__ for result in results],
+                    }
+                )
                 return
             if path.startswith("/api/run/") and path.endswith("/start"):
                 run_id = int(path.split("/")[3])
@@ -423,13 +485,15 @@ HTML = """<!doctype html>
     h1 { font-size: 18px; margin: 0; }
     button {
       border: 1px solid var(--line);
-      background: #fff;
+      background: #e4e9f0;
       border-radius: 6px;
       padding: 7px 10px;
       color: var(--ink);
       cursor: pointer;
     }
+    button:hover { background: #d7deea; }
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.primary:hover { background: #0f5c79; }
     main {
       display: grid;
       grid-template-columns: minmax(220px, 280px) minmax(360px, 1fr) minmax(260px, 340px);
@@ -472,6 +536,49 @@ HTML = """<!doctype html>
       border-radius: 6px;
       padding: 7px 8px;
       font: inherit;
+    }
+    .issue-picker {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      margin-bottom: 16px;
+    }
+    .issue-picker .issue-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .issue-list { max-height: 320px; overflow-y: auto; }
+    .issue-row {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .issue-row:last-child { border-bottom: none; }
+    .issue-row input { margin-top: 2px; }
+    .issue-row.on-desk { opacity: 0.6; }
+    .issue-title { cursor: pointer; }
+    .issue-title:hover { text-decoration: underline; }
+    .issue-body {
+      flex-basis: 100%;
+      margin-top: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--muted);
+      font-size: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .issue-badge {
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
     }
     .settings-panel {
       border: 1px solid var(--line);
@@ -640,20 +747,11 @@ HTML = """<!doctype html>
     <section>
       <h2>Queue</h2>
       <div class="project-form">
-        <select id="include-repo" title="Configured repository"></select>
-        <input id="include-issue" type="number" min="1" step="1" placeholder="Issue #">
-        <button onclick="includeIssue()">Add to desk</button>
-      </div>
-      <div class="project-form">
         <input id="clone-spec" placeholder="OWNER/REPO or GitHub URL to clone">
         <button onclick="cloneProject()">Clone &amp; add</button>
       </div>
       <div class="project-form">
-        <input id="project-path" placeholder="/path/to/existing/clone">
-        <div class="project-form-buttons">
-          <button onclick="addProject()">Add folder</button>
-          <button onclick="toggleBrowser()">Browse&hellip;</button>
-        </div>
+        <button onclick="toggleBrowser()">Browse for local folder&hellip;</button>
       </div>
       <div id="fs-browser" class="fs-browser" style="display:none"></div>
       <div class="settings-panel">
@@ -683,12 +781,15 @@ HTML = """<!doctype html>
     </section>
     <section>
       <div class="section-head">
-        <h2 id="runs-title">Current Runs</h2>
+        <h2 id="runs-title">Tasks</h2>
         <button id="project-back" onclick="backToProjects()" style="display:none">Back to folders</button>
       </div>
       <div id="runs"></div>
     </section>
     <section>
+      <h2>Add Issues</h2>
+      <div id="issue-tools" class="project-form"></div>
+      <div id="issue-picker"></div>
       <h2>Needs Attention</h2>
       <div id="attention"></div>
       <h2>Recent Events</h2>
@@ -698,6 +799,9 @@ HTML = """<!doctype html>
   <script>
     let settingsDirty = false;
     let settingsProjectPath = '';
+    let currentRepoName = '';
+    let pickerRepo = null;
+    let issuesLoading = false;
     async function action(path) {
       await fetch(path, { method: 'POST' });
       await refresh();
@@ -724,13 +828,11 @@ HTML = """<!doctype html>
       const panel = document.getElementById('fs-browser');
       if (panel) panel.style.display = 'none';
     }
-    async function addProject() {
-      const input = document.getElementById('project-path');
-      const path = input.value.trim();
+    async function addProject(path) {
+      path = (path || '').trim();
       if (!path) return;
       try {
         await postJson('/api/projects', { path });
-        input.value = '';
         closeBrowser();
       } catch (error) {
         alert(error.message || String(error));
@@ -747,35 +849,138 @@ HTML = """<!doctype html>
         alert(error.message || String(error));
       }
     }
-    function renderIncludeRepos(state) {
-      const select = document.getElementById('include-repo');
-      if (!select) return;
-      const projects = state.projects || [];
-      const current = select.value;
-      select.innerHTML = projects.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
-      if (current && projects.some(p => p.name === current)) select.value = current;
+    function renderIssueTools(state) {
+      const tools = document.getElementById('issue-tools');
+      if (!tools) return;
+      const path = selectedProjectPath();
+      const project = path ? projectForPath(state, path) : null;
+      currentRepoName = project ? project.name : '';
+      if (!issuesLoading) {
+        tools.innerHTML = currentRepoName
+          ? `<button onclick="syncIssues()">Sync issues</button>`
+          : '<div class="muted">Select a project folder to see its issues.</div>';
+      }
+      if (!currentRepoName) {
+        pickerRepo = null;
+        document.getElementById('issue-picker').innerHTML = '';
+      } else if (pickerRepo !== currentRepoName && !issuesLoading) {
+        // New repo selected: show its synced issues from disk (no GitHub call).
+        loadIssues();
+      }
     }
-    async function includeIssue() {
-      const repo = document.getElementById('include-repo').value;
-      const issueInput = document.getElementById('include-issue');
-      const issue = parseInt(issueInput.value, 10);
-      if (!repo) { alert('Select a configured repository first'); return; }
-      if (!Number.isInteger(issue) || issue <= 0) { alert('Enter a valid issue number'); return; }
+    async function loadIssues() {
+      const repo = currentRepoName;
+      const picker = document.getElementById('issue-picker');
+      if (!repo) return;
+      issuesLoading = true;
+      pickerRepo = repo;
       try {
-        const res = await fetch('/api/actions/include-issue', {
+        const res = await fetch(`/api/issues?repo=${encodeURIComponent(repo)}`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        renderIssuePicker(repo, data.issues || []);
+      } catch (error) {
+        pickerRepo = null;
+        picker.innerHTML = `<div class="muted" style="padding:10px">Failed to load: ${esc(error.message || String(error))}</div>`;
+      } finally {
+        issuesLoading = false;
+      }
+    }
+    async function syncIssues() {
+      const repo = currentRepoName;
+      const picker = document.getElementById('issue-picker');
+      const tools = document.getElementById('issue-tools');
+      if (!repo) { alert('Select a project folder first'); return; }
+      issuesLoading = true;
+      pickerRepo = repo;
+      tools.innerHTML = '<button disabled>Syncing…</button>';
+      picker.innerHTML = '<div class="muted" style="padding:10px">Syncing from GitHub…</div>';
+      try {
+        const res = await fetch('/api/actions/sync-issues', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo, issue })
+          body: JSON.stringify({ repo })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        renderIssuePicker(repo, data.issues || []);
+      } catch (error) {
+        pickerRepo = null;
+        picker.innerHTML = `<div class="muted" style="padding:10px">Sync failed: ${esc(error.message || String(error))}</div>`;
+      } finally {
+        issuesLoading = false;
+        tools.innerHTML = `<button onclick="syncIssues()">Sync issues</button>`;
+      }
+    }
+    function renderIssuePicker(repo, issues) {
+      const picker = document.getElementById('issue-picker');
+      pickerRepo = repo;
+      if (!issues.length) {
+        picker.innerHTML = '<div class="muted" style="padding:10px">No issues yet — click Sync issues.</div>';
+        return;
+      }
+      const rows = issues.map(issue => {
+        const badge = issue.on_desk ? '<span class="issue-badge">on desk</span>' : '';
+        const attrs = issue.on_desk ? 'checked disabled' : '';
+        const body = String(issue.body || '').trim();
+        const bodyHtml = body
+          ? `<div class="issue-body" id="body-${issue.number}" style="display:none">${esc(body)}</div>`
+          : '';
+        return `<div class="issue-row ${issue.on_desk ? 'on-desk' : ''}">
+          <input type="checkbox" value="${issue.number}" ${attrs}>
+          <span class="issue-title" onclick="toggleBody(${issue.number})"><strong>#${issue.number}</strong> ${esc(issue.title)}</span>
+          ${badge}
+          ${bodyHtml}
+        </div>`;
+      }).join('');
+      picker.innerHTML = `<div class="issue-picker">
+        <div class="issue-head">
+          <strong>${esc(repo)}</strong>
+          <button class="primary" onclick="addSelected()">Add selected</button>
+        </div>
+        <div class="issue-list">${rows}</div>
+      </div>`;
+    }
+    function toggleBody(number) {
+      const el = document.getElementById('body-' + number);
+      if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    }
+    async function addSelected() {
+      const repo = currentRepoName;
+      if (!repo) { alert('Select a project folder first'); return; }
+      const picker = document.getElementById('issue-picker');
+      const checked = [...picker.querySelectorAll('input[type=checkbox]:checked:not([disabled])')];
+      const issues = checked.map(box => parseInt(box.value, 10)).filter(Number.isInteger);
+      if (!issues.length) { alert('Select at least one issue to add'); return; }
+      const btn = picker.querySelector('.issue-head button');
+      if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+      try {
+        const res = await fetch('/api/actions/include-issues', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo, issues })
         });
         const result = await res.json().catch(() => ({}));
-        if (!res.ok || result.started === false) {
-          alert(result.message || 'Could not add the issue to the desk');
-        } else {
-          issueInput.value = '';
-        }
+        if (!res.ok) { alert(result.message || 'Could not add the selected issues'); return; }
       } catch (error) {
         alert(error.message || String(error));
+        return;
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Add selected'; }
       }
+      // Mark added rows on-desk in place — no second GitHub round-trip.
+      checked.forEach(box => {
+        box.checked = true;
+        box.disabled = true;
+        const row = box.closest('.issue-row');
+        if (row && !row.querySelector('.issue-badge')) {
+          row.classList.add('on-desk');
+          const badge = document.createElement('span');
+          badge.className = 'issue-badge';
+          badge.textContent = 'on desk';
+          row.appendChild(badge);
+        }
+      });
       await refresh();
     }
     async function toggleBrowser() {
@@ -811,8 +1016,7 @@ HTML = """<!doctype html>
         <ul class="fs-list">${rows}</ul>`;
     }
     async function selectFolder(path) {
-      document.getElementById('project-path').value = path;
-      await addProject();
+      await addProject(path);
     }
     function markSettingsDirty() {
       settingsDirty = true;
@@ -964,28 +1168,28 @@ HTML = """<!doctype html>
     }
     function stateSummary(runs) {
       const counts = stateCounts(runs);
-      return Object.entries(counts).sort().map(([key, value]) => `${key} ${value}`).join(' · ') || 'no runs';
+      return Object.entries(counts).sort().map(([key, value]) => `${value} ${key}`).join(' · ') || 'nothing queued';
     }
     function projectHtml(project, state) {
       const runs = state.runs.filter(run => run.project_path === project.path);
       return `<button class="project-row" data-path="${esc(project.path)}" onclick="selectProjectByPath(this)">
         <strong>${esc(project.name)}</strong>
         <div class="muted">${esc(project.path)}</div>
-        <div>${runs.length} runs · ${esc(stateSummary(runs))}</div>
+        <div>${esc(stateSummary(runs))}</div>
       </button>`;
     }
     function renderProjectIndex(state) {
       const projects = state.projects || [];
-      document.getElementById('runs-title').textContent = 'Current Runs';
+      document.getElementById('runs-title').textContent = 'Tasks';
       document.getElementById('project-back').style.display = 'none';
       return projects.map(project => projectHtml(project, state)).join('') || '<div class="muted">No project folders</div>';
     }
     function renderSelectedProject(state, path) {
       const project = (state.projects || []).find(item => item.path === path);
       const runs = state.runs.filter(run => run.project_path === path);
-      document.getElementById('runs-title').textContent = project ? project.name : 'Project Runs';
+      document.getElementById('runs-title').textContent = project ? project.name : 'Tasks';
       document.getElementById('project-back').style.display = '';
-      return runs.slice(0, 24).map(runHtml).join('') || '<div class="muted">No runs in this folder</div>';
+      return runs.slice(0, 24).map(runHtml).join('') || '<div class="muted">No tasks in this folder</div>';
     }
     function renderRuns(state) {
       const path = selectedProjectPath();
@@ -997,7 +1201,7 @@ HTML = """<!doctype html>
       const stats = state.stats || {};
       document.getElementById('health').textContent = `${state.scheduler.paused ? 'Paused' : 'Active'} · ${Object.values(stats).reduce((a,b) => a + b, 0)} runs tracked`;
       renderSettings(state);
-      renderIncludeRepos(state);
+      renderIssueTools(state);
       document.getElementById('stats').innerHTML = Object.entries(stats).sort().map(([key, value]) =>
         `<div class="metric-row"><span>${esc(key)}</span><strong>${value}</strong></div>`
       ).join('') || '<div class="muted">No runs yet</div>';

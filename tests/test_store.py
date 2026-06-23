@@ -58,5 +58,69 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(run["ci_fix_last_sha"], "abc123")
 
 
+    def test_state_is_traced_by_folder_moves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = Store(base / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=42,
+                issue_title="Fix queue",
+                issue_url="u",
+                branch_name="b",
+            )
+            repo_dir = base / "state" / "octo__example"
+            self.assertTrue((repo_dir / "queued" / f"{run_id}.json").exists())
+
+            store.update_run(run_id, state="running")
+            self.assertFalse((repo_dir / "queued" / f"{run_id}.json").exists())
+            self.assertTrue((repo_dir / "running" / f"{run_id}.json").exists())
+
+            store.update_run(run_id, state="done")
+            self.assertFalse((repo_dir / "running" / f"{run_id}.json").exists())
+            self.assertTrue((repo_dir / "done" / f"{run_id}.json").exists())
+            self.assertEqual(store.get_run(run_id)["state"], "done")
+
+    def test_available_records_are_intake_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            avail_id = store.create_available(
+                repo_name="octo/example",
+                issue_number=7,
+                issue_title="Synced",
+                issue_url="u7",
+                issue_body="body text",
+            )
+            # Available records do not count as runs or open runs.
+            self.assertEqual(store.list_runs(), [])
+            self.assertIsNone(store.find_open_run("octo/example", 7))
+            # But they show up in the picker view with their body.
+            records = store.list_records("octo/example")
+            self.assertEqual([r["issue_number"] for r in records], [7])
+            self.assertEqual(records[0]["issue_body"], "body text")
+
+            # Moving it onto the desk makes it a ready run.
+            store.update_run(avail_id, state="ready", branch_name="agent/issue-7")
+            self.assertEqual([r["state"] for r in store.list_runs()], ["ready"])
+            self.assertIsNotNone(store.find_open_run("octo/example", 7))
+            self.assertEqual(store.list_records("octo/example")[0]["state"], "ready")
+
+    def test_next_attempt_increments_per_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            self.assertEqual(store.next_attempt("octo/example", 5), 1)
+            first = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="t",
+                issue_url="u",
+                branch_name="b1",
+            )
+            store.update_run(first, state="failed")
+            self.assertEqual(store.next_attempt("octo/example", 5), 2)
+            # A finished/failed run is not an open run.
+            self.assertIsNone(store.find_open_run("octo/example", 5))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,14 +22,26 @@ class FakeGitHub:
             ],
         }
 
-    def list_ready_issues(self, repo, label, limit=10):
-        return self.issues[repo][:limit]
+    def list_open_issues(self, repo, limit=200):
+        return [{**issue, "labels": []} for issue in self.issues.get(repo, [])][:limit]
+
+    def get_issue(self, repo, issue_number):
+        for issue in self.issues.get(repo, []):
+            if int(issue["number"]) == issue_number:
+                return issue
+        return {"number": issue_number, "title": f"Issue {issue_number}", "body": "", "url": ""}
 
     def add_label(self, repo, issue_number, label):
-        raise AssertionError("label mutation should be disabled in this test")
+        pass
 
     def remove_label(self, repo, issue_number, label):
-        raise AssertionError("label mutation should be disabled in this test")
+        pass
+
+
+def queue_ready(scheduler, repo_name, numbers):
+    """Test helper: sync a repo's issues to disk, then move the given ones onto the desk."""
+    scheduler.sync_repo_issues(repo_name)
+    return [scheduler.mark_issue_ready(repo_name, number).run_id for number in numbers]
 
 
 class RecordingGitHub(FakeGitHub):
@@ -44,6 +56,17 @@ class RecordingGitHub(FakeGitHub):
         if self._add_label_error is not None:
             raise self._add_label_error
         self.added_labels.append((repo, issue_number, label))
+
+
+class OpenIssueGitHub(RecordingGitHub):
+    """Serves open issues with labels for list_repo_issues tests."""
+
+    def __init__(self, open_issues):
+        super().__init__()
+        self._open_issues = open_issues
+
+    def list_open_issues(self, repo, limit=50):
+        return self._open_issues.get(repo, [])[:limit]
 
 
 class NoopScheduler(Scheduler):
@@ -116,7 +139,7 @@ class BlockingCloseoutContinuationRunner:
 
 
 class SchedulerTests(unittest.TestCase):
-    def test_run_available_discovers_ready_runs_without_starting_workers(self):
+    def test_sync_then_add_queues_ready_runs_without_starting_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / "desk.sqlite")
@@ -130,14 +153,57 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
 
-            results = scheduler.run_available()
+            queue_ready(scheduler, "octo/one", [1, 2])
+            queue_ready(scheduler, "octo/two", [3, 4])
 
-            self.assertEqual(len(results), 4)
-            self.assertTrue(all(not result.started for result in results))
             self.assertEqual(store.dashboard_state()["stats"]["ready"], 4)
-            issues_by_run_order = [run["issue_number"] for run in reversed(store.list_runs())]
+            issues_by_run_order = sorted(run["issue_number"] for run in store.list_runs())
             self.assertEqual(issues_by_run_order, [1, 2, 3, 4])
-            self.assertEqual(scheduler.run_available(), [])
+            # Syncing again does not duplicate records.
+            scheduler.sync_repo_issues("octo/one")
+            self.assertEqual(store.dashboard_state()["stats"]["ready"], 4)
+
+    def test_list_repo_issues_flags_on_desk_issues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = OpenIssueGitHub(
+                {
+                    "octo/one": [
+                        {"number": 10, "title": "Fresh", "url": "u10", "body": "b10", "labels": []},
+                        {"number": 11, "title": "Added", "url": "u11", "body": "b11", "labels": []},
+                        {"number": 12, "title": "Running", "url": "u12", "body": "b12", "labels": []},
+                    ]
+                }
+            )
+            scheduler = NoopScheduler(config, store, github=github)
+            scheduler.sync_repo_issues("octo/one")
+            # Move two issues onto the desk; #10 stays available.
+            scheduler.mark_issue_ready("octo/one", 11)
+            scheduler.mark_issue_ready("octo/one", 12)
+
+            issues = scheduler.list_repo_issues("octo/one")
+
+            on_desk = {issue["number"]: issue["on_desk"] for issue in issues}
+            self.assertEqual(on_desk, {10: False, 11: True, 12: True})
+            self.assertEqual({i["number"]: i["body"] for i in issues}[10], "b10")
+
+    def test_list_repo_issues_rejects_unconfigured_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=OpenIssueGitHub({}))
+
+            with self.assertRaises(KeyError):
+                scheduler.list_repo_issues("octo/missing")
 
     def test_mark_issue_ready_adds_label_and_queues_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,7 +243,7 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(github.added_labels, [])
             self.assertEqual(store.list_runs(), [])
 
-    def test_mark_issue_ready_reports_github_failure(self):
+    def test_mark_issue_ready_tolerates_label_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / "desk.sqlite")
@@ -190,9 +256,9 @@ class SchedulerTests(unittest.TestCase):
 
             result = scheduler.mark_issue_ready("octo/one", 1)
 
-            self.assertFalse(result.started)
-            self.assertIn("label not found", result.message)
-            self.assertEqual(store.list_runs(), [])
+            # Desk state is folder-driven; the cosmetic label failure must not block it.
+            self.assertTrue(result.started)
+            self.assertEqual([run["state"] for run in store.list_runs()], ["ready"])
 
     def test_start_run_claims_ready_issue_after_human_click(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,7 +270,7 @@ class SchedulerTests(unittest.TestCase):
                 repos=[RepoConfig(name="octo/one", local_path=root / "one")],
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
-            run_id = scheduler.run_available()[0].run_id
+            run_id = queue_ready(scheduler, "octo/one", [1])[0]
 
             result = scheduler.start_run(run_id)
             run = store.get_run(run_id)
@@ -224,7 +290,7 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
             scheduler.update_settings(workspace_path=root / "one", max_concurrent_runs=1)
-            run_ids = [result.run_id for result in scheduler.run_available()]
+            run_ids = queue_ready(scheduler, "octo/one", [1, 2])
 
             first = scheduler.start_run(run_ids[0])
             second = scheduler.start_run(run_ids[1])
@@ -275,6 +341,7 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
             scheduler.update_settings(workspace_path=root / "one", auto_start_ready=True)
+            queue_ready(scheduler, "octo/one", [1, 2])
 
             scheduler.poll_once()
             stats = store.dashboard_state()["stats"]
@@ -293,7 +360,7 @@ class SchedulerTests(unittest.TestCase):
                 ],
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
-            run_ids = [result.run_id for result in scheduler.run_available()]
+            run_ids = queue_ready(scheduler, "octo/one", [1, 2]) + queue_ready(scheduler, "octo/two", [3])
 
             first = scheduler.start_run(run_ids[0])
             second_same_workspace = scheduler.start_run(run_ids[1])
@@ -323,7 +390,8 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
 
-            result = scheduler.run_next()
+            # Re-adding a failed issue to the desk creates a fresh run with a new branch.
+            result = scheduler.mark_issue_ready("octo/one", 1)
             run = store.get_run(result.run_id)
 
             self.assertTrue(result.started)

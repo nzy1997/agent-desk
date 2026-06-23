@@ -6,6 +6,17 @@ from agent_desk.github_client import GitHubClient, PullRequestChecksStatus
 
 
 class GitHubClientTests(unittest.TestCase):
+    def test_list_open_issues_requests_bodies_without_label_filter(self):
+        payload = '[{"number":1,"title":"One","body":"b1","url":"u1","labels":[]}]'
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh", "issue", "list"], 0, payload, "")
+            issues = GitHubClient().list_open_issues("octo/example")
+        args = run.call_args.args[0]
+        # No --label (that search index lags); bodies are fetched for the picker.
+        self.assertNotIn("--label", args)
+        self.assertIn("number,title,body,url,labels", args)
+        self.assertEqual([issue["number"] for issue in issues], [1])
+
     def test_pr_checks_status_parses_failed_checks_even_when_gh_exits_nonzero(self):
         with patch("agent_desk.github_client.subprocess.run") as run:
             run.side_effect = [

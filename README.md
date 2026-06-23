@@ -7,7 +7,10 @@ This MVP uses only the Python standard library plus local command-line tools:
 - `gh` for GitHub issues and pull requests
 - `git` for worktrees and branches
 - `codex exec` for non-interactive worker runs
-- SQLite for local state
+- JSON files on disk for local state — each issue/run is one file whose **state
+  is the folder it lives in** (`state/<owner>__<repo>/<state>/<id>.json`), so the
+  full pipeline is inspectable and greppable. See
+  `docs/superpowers/specs/2026-06-23-filesystem-run-store-design.md`.
 
 ## MVP Scope
 
@@ -46,16 +49,19 @@ Run one issue manually:
 python3 -m agent_desk run-next --config config/repos.toml
 ```
 
-The scheduler polls GitHub and queues ready issues as local `ready` runs. It
-does not start Codex workers by itself. Use the dashboard `Run` button, or
-`run-next`, to start one queued issue.
+The `ready/` folder on disk is the queue. The scheduler does not start Codex
+workers by itself; use the dashboard `Run` button, or `run-next`, to start one
+ready task.
 
-To pull an issue onto the desk without leaving the dashboard, use the **Add to
-desk** control in the Queue panel: pick a configured repository, enter the issue
-number, and click. This adds the repository's `ready_label` (`agent:ready`) to
-the issue and queues it immediately. Because it is an explicit manual action, it
-writes the label even when `mutate_github = false` — that flag only gates the
-automatic label changes made during the worker loop.
+To put issues on the desk, select a project in the Tasks panel; the **Add
+Issues** panel (right column) follows that selection. Click **Sync issues** to
+pull the repository's open issues from GitHub onto local disk (the `available/`
+folder) — this is the only GitHub read. The picker then lists issues **from
+disk**; click an issue title to expand its full body. Tick the ones you want and
+click **Add selected** to move them onto the desk (`available/ → ready/`). Issues
+already on the desk show an "on desk" badge with a disabled checkbox. Adding
+writes the `agent:ready` label to GitHub best-effort for visibility, but desk
+state is driven by the on-disk folders, not the label.
 
 ## Adding Repositories
 
@@ -64,9 +70,9 @@ You can register a repository three ways:
 - **Dashboard — clone:** enter `OWNER/REPO` (or a GitHub URL) and click
   `Clone & add`. The repo is cloned with `gh repo clone` into
   `clone_root/OWNER/REPO` and registered automatically.
-- **Dashboard — existing folder:** click `Browse…` to pick a local folder from a
-  built-in directory browser (git repos are marked), or type the path and click
-  `Add folder`.
+- **Dashboard — existing folder:** click `Browse for local folder…` and pick a
+  local folder from the built-in directory browser (git repos are marked), then
+  `Select` it (or `Add this folder` for the current directory).
 - **CLI:** `agent-desk add-repo --path /abs/path/to/clone` for an existing clone,
   or `agent-desk add-repo --clone OWNER/REPO` to clone then register.
 

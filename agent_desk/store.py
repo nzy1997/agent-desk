@@ -1,14 +1,23 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
-import sqlite3
-from typing import Any, Iterator
+import threading
+from typing import Any
 
 
+# Run states that mean "no further automated work" (used by find_open_run).
 TERMINAL_STATES = {"done", "failed", "blocked", "pr_open", "needs_review"}
+
+# Valid run states (folders). "available" is a synced issue that is not yet a run.
+RUN_STATES = ("queued", "ready", "running", "pr_open", "needs_review", "blocked", "done", "failed")
+ALL_STATES = ("available",) + RUN_STATES
+
+# find_open_run looks for an active run, so it ignores synced-but-not-queued
+# issues and finished work.
+_OPEN_EXCLUDE = {"available", "done", "failed", "blocked"}
 
 
 def utc_now() -> str:
@@ -16,80 +25,115 @@ def utc_now() -> str:
 
 
 class Store:
+    """Filesystem-backed run store.
+
+    Each run/issue is a single JSON file. Its ``state`` is the folder it lives
+    in, under ``<base>/state/<owner>__<repo>/<state>/<id>.json``. A state
+    transition rewrites the file into the new folder and removes the old copy.
+    All mutations take a process-wide lock and use atomic writes.
+
+    The constructor accepts the legacy SQLite path for compatibility; if the
+    path has a suffix (e.g. ``agent-desk.sqlite``) its parent directory is used
+    as the base, otherwise the path itself is the base directory.
+    """
+
     def __init__(self, path: Path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._migrate()
+        p = Path(path)
+        self.base = p.parent if p.suffix else p
+        self.state_dir = self.base / "state"
+        self.counters_path = self.base / "counters.json"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+    # ------------------------------------------------------------------ utils
+    @staticmethod
+    def _slug(repo_name: str) -> str:
+        return repo_name.replace("/", "__")
 
-    def _migrate(self) -> None:
-        with self.connect() as conn:
-            conn.executescript(
-                """
-                create table if not exists runs (
-                    id integer primary key autoincrement,
-                    repo_name text not null,
-                    issue_number integer not null,
-                    issue_title text not null,
-                    issue_body text not null default '',
-                    issue_url text not null,
-                    branch_name text not null,
-                    state text not null default 'queued',
-                    stage text not null default 'queued',
-                    attempt integer not null default 1,
-                    run_dir text not null default '',
-                    worktree_path text not null default '',
-                    codex_thread_id text not null default '',
-                    pr_url text not null default '',
-                    last_error text not null default '',
-                    created_at text not null,
-                    updated_at text not null,
-                    started_at text not null default '',
-                    ended_at text not null default ''
-                );
+    def _atomic_write(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
 
-                create table if not exists events (
-                    id integer primary key autoincrement,
-                    run_id integer not null,
-                    repo_name text not null,
-                    issue_number integer not null,
-                    level text not null,
-                    event_type text not null,
-                    message text not null,
-                    payload_json text not null,
-                    created_at text not null,
-                    foreign key(run_id) references runs(id)
-                );
+    def _next(self, name: str) -> int:
+        with self._lock:
+            data: dict[str, int] = {}
+            if self.counters_path.exists():
+                data = json.loads(self.counters_path.read_text(encoding="utf-8") or "{}")
+            value = int(data.get(name, 0)) + 1
+            data[name] = value
+            self._atomic_write(self.counters_path, json.dumps(data))
+            return value
 
-                create index if not exists idx_runs_issue
-                    on runs(repo_name, issue_number, state);
-                create index if not exists idx_events_run
-                    on events(run_id, id desc);
-                """
-            )
-            self._ensure_column(conn, "runs", "run_dir", "text not null default ''")
-            self._ensure_column(conn, "runs", "issue_body", "text not null default ''")
-            self._ensure_column(conn, "runs", "codex_thread_id", "text not null default ''")
-            self._ensure_column(conn, "runs", "pr_ci_status", "text not null default ''")
-            self._ensure_column(conn, "runs", "pr_ci_summary", "text not null default ''")
-            self._ensure_column(conn, "runs", "pr_ci_checked_at", "text not null default ''")
-            self._ensure_column(conn, "runs", "ci_fix_attempts", "integer not null default 0")
-            self._ensure_column(conn, "runs", "ci_fix_last_sha", "text not null default ''")
+    def _path_for(self, repo_name: str, state: str, run_id: int) -> Path:
+        return self.state_dir / self._slug(repo_name) / state / f"{run_id}.json"
 
-    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-        columns = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}
-        if column not in columns:
-            conn.execute(f"alter table {table} add column {column} {definition}")
+    def _find_path(self, run_id: int) -> Path | None:
+        for path in self.state_dir.glob(f"*/*/{run_id}.json"):
+            return path
+        return None
 
+    @staticmethod
+    def _read(path: Path) -> dict[str, Any]:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _write_record(self, record: dict[str, Any]) -> Path:
+        path = self._path_for(record["repo_name"], record["state"], record["id"])
+        self._atomic_write(path, json.dumps(record))
+        return path
+
+    def _all_records(self) -> list[dict[str, Any]]:
+        records = []
+        for path in self.state_dir.glob("*/*/*.json"):
+            if path.name.endswith(".tmp"):
+                continue
+            records.append(self._read(path))
+        return records
+
+    def _records_for_repo(self, repo_name: str) -> list[dict[str, Any]]:
+        repo_dir = self.state_dir / self._slug(repo_name)
+        records = []
+        for path in repo_dir.glob("*/*.json"):
+            if path.name.endswith(".tmp"):
+                continue
+            records.append(self._read(path))
+        return records
+
+    @staticmethod
+    def _new_record(run_id: int, repo_name: str, issue_number: int, **overrides: Any) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": run_id,
+            "repo_name": repo_name,
+            "issue_number": int(issue_number),
+            "issue_title": "",
+            "issue_body": "",
+            "issue_url": "",
+            "branch_name": "",
+            "state": "queued",
+            "stage": "queued",
+            "attempt": 1,
+            "run_dir": "",
+            "worktree_path": "",
+            "codex_thread_id": "",
+            "pr_url": "",
+            "pr_ci_status": "",
+            "pr_ci_summary": "",
+            "pr_ci_checked_at": "",
+            "ci_fix_attempts": 0,
+            "ci_fix_last_sha": "",
+            "last_error": "",
+            "created_at": now,
+            "updated_at": now,
+            "started_at": "",
+            "ended_at": "",
+            "events": [],
+        }
+        record.update(overrides)
+        return record
+
+    # --------------------------------------------------------------- run API
     def create_run(
         self,
         *,
@@ -100,76 +144,120 @@ class Store:
         branch_name: str,
         issue_body: str = "",
     ) -> int:
-        now = utc_now()
-        attempt = self.next_attempt(repo_name, issue_number)
-        with self.connect() as conn:
-            cur = conn.execute(
-                """
-                insert into runs (
-                    repo_name, issue_number, issue_title, issue_body, issue_url, branch_name,
-                    attempt, created_at, updated_at
-                )
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (repo_name, issue_number, issue_title, issue_body, issue_url, branch_name, attempt, now, now),
+        with self._lock:
+            run_id = self._next("id")
+            attempt = self.next_attempt(repo_name, issue_number)
+            record = self._new_record(
+                run_id,
+                repo_name,
+                issue_number,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                issue_url=issue_url,
+                branch_name=branch_name,
+                attempt=attempt,
             )
-            run_id = int(cur.lastrowid)
-        self.add_event(run_id, "info", "queued", f"Queued issue #{issue_number}", {})
-        return run_id
+            self._write_record(record)
+            self.add_event(run_id, "info", "queued", f"Queued issue #{issue_number}", {})
+            return run_id
+
+    def create_available(
+        self,
+        *,
+        repo_name: str,
+        issue_number: int,
+        issue_title: str,
+        issue_url: str,
+        issue_body: str = "",
+    ) -> int:
+        """Create a synced-issue record in the ``available`` state (not a run)."""
+        with self._lock:
+            run_id = self._next("id")
+            record = self._new_record(
+                run_id,
+                repo_name,
+                issue_number,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                issue_url=issue_url,
+                state="available",
+                stage="",
+            )
+            self._write_record(record)
+            return run_id
 
     def next_attempt(self, repo_name: str, issue_number: int) -> int:
-        with self.connect() as conn:
-            row = conn.execute(
-                "select max(attempt) as attempt from runs where repo_name = ? and issue_number = ?",
-                (repo_name, issue_number),
-            ).fetchone()
-        if not row or row["attempt"] is None:
-            return 1
-        return int(row["attempt"]) + 1
+        attempts = [
+            int(record["attempt"])
+            for record in self._records_for_repo(repo_name)
+            if record["issue_number"] == int(issue_number)
+        ]
+        return (max(attempts) + 1) if attempts else 1
 
     def get_run(self, run_id: int) -> dict[str, Any]:
-        with self.connect() as conn:
-            row = conn.execute("select * from runs where id = ?", (run_id,)).fetchone()
-        if row is None:
+        path = self._find_path(int(run_id))
+        if path is None:
             raise KeyError(f"run {run_id} does not exist")
-        return dict(row)
+        return self._read(path)
 
     def find_open_run(self, repo_name: str, issue_number: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                select * from runs
-                where repo_name = ? and issue_number = ?
-                  and state not in ('done', 'failed', 'blocked')
-                order by id desc
-                limit 1
-                """,
-                (repo_name, issue_number),
-            ).fetchone()
-        return dict(row) if row else None
+        candidates = [
+            record
+            for record in self._records_for_repo(repo_name)
+            if record["issue_number"] == int(issue_number) and record["state"] not in _OPEN_EXCLUDE
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda record: record["id"])
+
+    def get_record(self, repo_name: str, issue_number: int) -> dict[str, Any] | None:
+        """Return the latest record for an issue in any state (including available)."""
+        candidates = [
+            record
+            for record in self._records_for_repo(repo_name)
+            if record["issue_number"] == int(issue_number)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda record: record["id"])
+
+    def list_records(self, repo_name: str) -> list[dict[str, Any]]:
+        """Return the latest record per issue for a repo (for the issue picker)."""
+        latest: dict[int, dict[str, Any]] = {}
+        for record in self._records_for_repo(repo_name):
+            number = record["issue_number"]
+            if number not in latest or record["id"] > latest[number]["id"]:
+                latest[number] = record
+        return sorted(latest.values(), key=lambda record: record["issue_number"], reverse=True)
 
     def list_runs(self, states: set[str] | None = None) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            if states:
-                placeholders = ",".join("?" for _ in states)
-                rows = conn.execute(
-                    f"select * from runs where state in ({placeholders}) order by id desc",
-                    tuple(sorted(states)),
-                ).fetchall()
-            else:
-                rows = conn.execute("select * from runs order by id desc limit 100").fetchall()
-        return [dict(row) for row in rows]
+        records = self._all_records()
+        if states:
+            selected = [record for record in records if record["state"] in states]
+            selected.sort(key=lambda record: record["id"], reverse=True)
+            return selected
+        selected = [record for record in records if record["state"] != "available"]
+        selected.sort(key=lambda record: record["id"], reverse=True)
+        return selected[:100]
 
     def update_run(self, run_id: int, **fields: Any) -> None:
         if not fields:
             return
-        fields["updated_at"] = utc_now()
-        if fields.get("state") in {"done", "failed", "blocked", "pr_open", "needs_review"}:
-            fields.setdefault("ended_at", utc_now())
-        assignments = ", ".join(f"{key} = ?" for key in fields)
-        values = list(fields.values()) + [run_id]
-        with self.connect() as conn:
-            conn.execute(f"update runs set {assignments} where id = ?", values)
+        with self._lock:
+            path = self._find_path(int(run_id))
+            if path is None:
+                raise KeyError(f"run {run_id} does not exist")
+            record = self._read(path)
+            old_state = record["state"]
+            fields["updated_at"] = utc_now()
+            if fields.get("state") in TERMINAL_STATES:
+                fields.setdefault("ended_at", utc_now())
+            record.update(fields)
+            self._write_record(record)
+            if record["state"] != old_state:
+                old_path = self._path_for(record["repo_name"], old_state, record["id"])
+                if old_path.exists():
+                    old_path.unlink()
 
     def add_event(
         self,
@@ -179,39 +267,33 @@ class Store:
         message: str,
         payload: dict[str, Any],
     ) -> None:
-        run = self.get_run(run_id)
-        with self.connect() as conn:
-            conn.execute(
-                """
-                insert into events (
-                    run_id, repo_name, issue_number, level, event_type,
-                    message, payload_json, created_at
-                )
-                values (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    run["repo_name"],
-                    run["issue_number"],
-                    level,
-                    event_type,
-                    message,
-                    json.dumps(payload, sort_keys=True),
-                    utc_now(),
-                ),
+        with self._lock:
+            path = self._find_path(int(run_id))
+            if path is None:
+                raise KeyError(f"run {run_id} does not exist")
+            record = self._read(path)
+            record["events"].append(
+                {
+                    "seq": self._next("event"),
+                    "run_id": int(run_id),
+                    "repo_name": record["repo_name"],
+                    "issue_number": record["issue_number"],
+                    "level": level,
+                    "event_type": event_type,
+                    "message": message,
+                    "payload": payload,
+                    "created_at": utc_now(),
+                }
             )
+            self._write_record(record)
 
     def dashboard_state(self) -> dict[str, Any]:
         runs = self.list_runs()
-        with self.connect() as conn:
-            event_rows = conn.execute(
-                "select * from events order by id desc limit 200"
-            ).fetchall()
         events = []
-        for row in event_rows:
-            event = dict(row)
-            event["payload"] = json.loads(event.pop("payload_json"))
-            events.append(event)
+        for record in self._all_records():
+            events.extend(record.get("events", []))
+        events.sort(key=lambda event: event.get("seq", 0), reverse=True)
+        events = events[:200]
         stats: dict[str, int] = {}
         for run in runs:
             stats[run["state"]] = stats.get(run["state"], 0) + 1

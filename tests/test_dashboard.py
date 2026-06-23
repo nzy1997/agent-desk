@@ -14,8 +14,14 @@ from agent_desk.store import Store
 
 
 class _IncludeIssueGitHub:
-    def list_ready_issues(self, repo, label, limit=10):
-        return [{"number": 5, "title": "Wire it up", "body": "do", "url": "https://example.test/5"}]
+    def list_open_issues(self, repo, limit=200):
+        return [
+            {"number": 5, "title": "Wire it up", "body": "do 5", "url": "https://example.test/5", "labels": []},
+            {"number": 6, "title": "Second", "body": "do 6", "url": "https://example.test/6", "labels": []},
+        ]
+
+    def get_issue(self, repo, issue_number):
+        return {"number": issue_number, "title": "Wire it up", "body": "do", "url": "https://example.test/5"}
 
     def add_label(self, repo, issue_number, label):
         self.added = (repo, issue_number, label)
@@ -263,18 +269,28 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(run["project_name"], "octo/example")
 
     def test_dashboard_html_renders_add_project_and_folder_index(self):
-        self.assertIn("addProject()", HTML)
+        # Folders are added by browsing and selecting, not by typing a path.
+        self.assertIn("addProject(path)", HTML)
+        self.assertIn("selectFolder(", HTML)
+        self.assertIn("toggleBrowser()", HTML)
+        self.assertNotIn('id="project-path"', HTML)
         self.assertIn("/api/projects", HTML)
         self.assertIn("renderProjectIndex(state)", HTML)
         self.assertIn("selectProjectByPath(this)", HTML)
         self.assertIn("Back to folders", HTML)
 
-    def test_dashboard_html_renders_include_issue_control(self):
-        self.assertIn("include-repo", HTML)
-        self.assertIn("include-issue", HTML)
-        self.assertIn("includeIssue()", HTML)
-        self.assertIn("/api/actions/include-issue", HTML)
-        self.assertIn("renderIncludeRepos(state)", HTML)
+    def test_dashboard_html_renders_issue_picker_control(self):
+        self.assertIn('id="issue-tools"', HTML)
+        self.assertIn("syncIssues()", HTML)
+        self.assertIn("/api/actions/sync-issues", HTML)
+        self.assertIn("renderIssuePicker(", HTML)
+        self.assertIn("addSelected()", HTML)
+        self.assertIn("toggleBody(", HTML)
+        self.assertIn("/api/actions/include-issues", HTML)
+        self.assertIn("renderIssueTools(state)", HTML)
+        self.assertIn("on desk", HTML)
+        # Picker follows the selected project, not a separate repo dropdown.
+        self.assertNotIn('id="include-repo"', HTML)
 
     def test_dashboard_html_renders_workspace_settings_controls(self):
         self.assertIn("/api/settings", HTML)
@@ -346,59 +362,116 @@ class ServeDashboardPortTests(unittest.TestCase):
             blocker.close()
 
 
-class IncludeIssueRouteTests(unittest.TestCase):
-    def _post(self, host, port, body):
-        request = urllib.request.Request(
-            f"http://{host}:{port}/api/actions/include-issue",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+class IssuePickerRouteTests(unittest.TestCase):
+    host = "127.0.0.1"
+
+    def _serve(self, store, scheduler):
+        bound: dict[str, int] = {}
+        ready = threading.Event()
+        thread = threading.Thread(
+            target=serve_dashboard,
+            kwargs={
+                "host": self.host,
+                "port": 0,
+                "store": store,
+                "scheduler": scheduler,
+                "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+            },
+            daemon=True,
         )
+        thread.start()
+        self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+        return bound["port"]
+
+    def _request(self, port, path, body=None):
+        url = f"http://{self.host}:{port}{path}"
+        if body is None:
+            request = urllib.request.Request(url, method="GET")
+        else:
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
                 return response.status, json.loads(response.read())
         except urllib.error.HTTPError as error:
             return error.code, None
 
-    def test_include_issue_route_labels_and_queues(self):
-        host = "127.0.0.1"
-        bound: dict[str, int] = {}
-        ready = threading.Event()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            store = Store(root / "desk.sqlite")
-            config = AgentDeskConfig(
-                data_dir=root / "data",
-                repos=[RepoConfig(name="octo/example", local_path=root / "example")],
-            )
-            scheduler = Scheduler(config, store, github=_IncludeIssueGitHub())
-            thread = threading.Thread(
-                target=serve_dashboard,
-                kwargs={
-                    "host": host,
-                    "port": 0,
-                    "store": store,
-                    "scheduler": scheduler,
-                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
-                },
-                daemon=True,
-            )
-            thread.start()
-            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
-            port = bound["port"]
+    def _build(self, tmp):
+        root = Path(tmp)
+        store = Store(root / "desk.sqlite")
+        config = AgentDeskConfig(
+            data_dir=root / "data",
+            repos=[RepoConfig(name="octo/example", local_path=root / "example")],
+        )
+        scheduler = Scheduler(config, store, github=_IncludeIssueGitHub())
+        return store, scheduler
 
-            status, payload = self._post(host, port, {"repo": "octo/example", "issue": 5})
+    def test_include_issue_route_labels_and_queues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, scheduler = self._build(tmp)
+            port = self._serve(store, scheduler)
+
+            status, payload = self._request(port, "/api/actions/include-issue", {"repo": "octo/example", "issue": 5})
             self.assertEqual(status, 200)
             self.assertTrue(payload["started"])
-
             self.assertEqual([run["issue_number"] for run in store.list_runs()], [5])
 
-            bad_repo_status, _ = self._post(host, port, {"issue": 5})
-            self.assertEqual(bad_repo_status, 400)
-            bad_issue_status, _ = self._post(host, port, {"repo": "octo/example", "issue": "abc"})
-            self.assertEqual(bad_issue_status, 400)
-            nonpositive_status, _ = self._post(host, port, {"repo": "octo/example", "issue": 0})
-            self.assertEqual(nonpositive_status, 400)
+            self.assertEqual(self._request(port, "/api/actions/include-issue", {"issue": 5})[0], 400)
+            self.assertEqual(
+                self._request(port, "/api/actions/include-issue", {"repo": "octo/example", "issue": "abc"})[0], 400
+            )
+            self.assertEqual(
+                self._request(port, "/api/actions/include-issue", {"repo": "octo/example", "issue": 0})[0], 400
+            )
+
+    def test_sync_and_listing_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, scheduler = self._build(tmp)
+            port = self._serve(store, scheduler)
+
+            # Before sync the disk listing is empty (no GitHub call on read).
+            status, payload = self._request(port, "/api/issues?repo=octo/example")
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["issues"], [])
+
+            # Sync pulls issues to disk; all start off-desk with their bodies.
+            status, payload = self._request(port, "/api/actions/sync-issues", {"repo": "octo/example"})
+            self.assertEqual(status, 200)
+            on_desk = {i["number"]: i["on_desk"] for i in payload["issues"]}
+            self.assertEqual(on_desk, {5: False, 6: False})
+            self.assertEqual({i["number"]: i["body"] for i in payload["issues"]}[5], "do 5")
+
+            # Adding one flips its on_desk flag on the disk-backed listing.
+            self._request(port, "/api/actions/include-issues", {"repo": "octo/example", "issues": [6]})
+            status, payload = self._request(port, "/api/issues?repo=octo/example")
+            self.assertEqual({i["number"]: i["on_desk"] for i in payload["issues"]}, {5: False, 6: True})
+
+            self.assertEqual(self._request(port, "/api/issues")[0], 400)
+            self.assertEqual(self._request(port, "/api/issues?repo=octo/missing")[0], 404)
+            self.assertEqual(self._request(port, "/api/actions/sync-issues", {})[0], 400)
+            self.assertEqual(self._request(port, "/api/actions/sync-issues", {"repo": "octo/missing"})[0], 404)
+
+    def test_include_issues_batch_route_adds_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, scheduler = self._build(tmp)
+            port = self._serve(store, scheduler)
+
+            status, payload = self._request(
+                port, "/api/actions/include-issues", {"repo": "octo/example", "issues": [5, 5, -1]}
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["added"], 1)
+            self.assertEqual(payload["requested"], 1)
+            self.assertEqual([run["issue_number"] for run in store.list_runs()], [5])
+
+            self.assertEqual(self._request(port, "/api/actions/include-issues", {"issues": [5]})[0], 400)
+            self.assertEqual(
+                self._request(port, "/api/actions/include-issues", {"repo": "octo/example", "issues": []})[0], 400
+            )
 
 
 if __name__ == "__main__":
