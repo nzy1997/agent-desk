@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
 import threading
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 
 # Run states that mean "no further automated work" (used by find_open_run).
@@ -56,8 +62,29 @@ class Store:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)
 
+    @contextlib.contextmanager
+    def _file_lock(self):
+        """Cross-process advisory lock around the shared counters file.
+
+        Detached supervisor processes share ``counters.json`` for the global
+        ``id``/``event`` sequence; ``self._lock`` only serializes within one
+        process. ``flock`` serializes the read-modify-write across processes too.
+        Falls back to a no-op where ``fcntl`` is unavailable (non-POSIX).
+        """
+        if fcntl is None:
+            yield
+            return
+        self.base.mkdir(parents=True, exist_ok=True)
+        handle = open(self.base / "counters.lock", "w")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            handle.close()
+
     def _next(self, name: str) -> int:
-        with self._lock:
+        with self._lock, self._file_lock():
             data: dict[str, int] = {}
             if self.counters_path.exists():
                 data = json.loads(self.counters_path.read_text(encoding="utf-8") or "{}")

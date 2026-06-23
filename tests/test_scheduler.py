@@ -758,5 +758,204 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(continuation.calls, [(pr_run_id, pr_status, 1, 3)])
 
 
+class RecordingWorker:
+    """Captures the kwargs run_job reconstructs for the issue job."""
+
+    def __init__(self):
+        self.calls = []
+
+    def run_issue(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+class DetachedJobTests(unittest.TestCase):
+    def _config(self, root: Path) -> AgentDeskConfig:
+        return AgentDeskConfig(
+            data_dir=root / "data",
+            repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+        )
+
+    def test_run_job_issue_reconstructs_worker_kwargs_from_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            worker = RecordingWorker()
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub(), worker=worker)
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=7,
+                issue_title="Title",
+                issue_url="https://example.test/7",
+                branch_name="agent/issue-7",
+                issue_body="body text",
+            )
+
+            scheduler.run_job(run_id, "issue")
+
+            self.assertEqual(len(worker.calls), 1)
+            call = worker.calls[0]
+            self.assertEqual(call["issue_number"], 7)
+            self.assertEqual(call["issue_title"], "Title")
+            self.assertEqual(call["issue_body"], "body text")
+            self.assertEqual(call["branch_name"], "agent/issue-7")
+            self.assertEqual(call["repo"].name, "octo/one")
+
+    def test_run_job_ci_fix_refetches_pr_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            pr_status = PullRequestChecksStatus(state="failure", summary="boom", checks=[], head_sha="abc")
+            github = FakePullRequestGitHub(pr_status)
+            continuation = FakeContinuationRunner()
+            scheduler = Scheduler(
+                self._config(root),
+                store,
+                github=github,
+                continuation_factory=lambda config, store: continuation,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="T",
+                issue_url="u8",
+                branch_name="agent/issue-8",
+            )
+            store.update_run(run_id, pr_url="https://example.test/pr/8", ci_fix_attempts=2)
+
+            scheduler.run_job(run_id, "ci-fix")
+
+            self.assertEqual(github.pr_status_calls, [("octo/one", "https://example.test/pr/8")])
+            self.assertEqual(continuation.calls, [(run_id, pr_status, 2, 3)])
+
+    def test_run_job_closeout_kinds_call_continuation(self):
+        for kind, expected in [
+            ("approve-finish", "approve_finish"),
+            ("auto-finish", "finish_after_ci_success"),
+        ]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                store = Store(root / "desk.sqlite")
+                continuation = FakeContinuationRunner()
+                scheduler = Scheduler(
+                    self._config(root),
+                    store,
+                    github=FakeGitHub(),
+                    continuation_factory=lambda config, store: continuation,
+                )
+                run_id = store.create_run(
+                    repo_name="octo/one",
+                    issue_number=20,
+                    issue_title="T",
+                    issue_url="u20",
+                    branch_name="b",
+                )
+                scheduler.run_job(run_id, kind)
+                self.assertEqual(continuation.calls, [(expected, run_id)])
+
+    def test_spawn_detached_job_requires_config_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub(), detach_jobs=True)
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=21,
+                issue_title="T",
+                issue_url="u21",
+                branch_name="b",
+            )
+            with self.assertRaises(RuntimeError):
+                scheduler._spawn_detached_job(run_id, "issue")
+
+    def test_run_job_rejects_unknown_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub())
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=9,
+                issue_title="T",
+                issue_url="u9",
+                branch_name="b",
+            )
+            with self.assertRaises(ValueError):
+                scheduler.run_job(run_id, "nope")
+
+    def test_dispatch_spawns_detached_job_and_records_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(
+                self._config(root),
+                store,
+                github=FakeGitHub(),
+                config_path=root / "repos.toml",
+                detach_jobs=True,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=5,
+                issue_title="T",
+                issue_url="u5",
+                branch_name="b",
+            )
+            spawned = {}
+
+            def fake_popen(argv, **kwargs):
+                spawned["argv"] = argv
+                spawned["kwargs"] = kwargs
+
+                class _Proc:
+                    pid = 4321
+
+                return _Proc()
+
+            import agent_desk.scheduler as scheduler_module
+
+            original = scheduler_module.subprocess.Popen
+            scheduler_module.subprocess.Popen = fake_popen
+            try:
+                scheduler._start_daemon_thread(scheduler._run_worker_for_issue, {"run_id": run_id})
+            finally:
+                scheduler_module.subprocess.Popen = original
+
+            self.assertIn("run-job", spawned["argv"])
+            self.assertIn("issue", spawned["argv"])
+            self.assertTrue(spawned["kwargs"]["start_new_session"])
+            self.assertEqual(store.get_run(run_id)["supervisor_pid"], 4321)
+
+    def test_reconcile_orphans_fails_dead_runs_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub())
+            alive = store.create_run(
+                repo_name="octo/one", issue_number=1, issue_title="a", issue_url="u1", branch_name="b1"
+            )
+            dead = store.create_run(
+                repo_name="octo/one", issue_number=2, issue_title="b", issue_url="u2", branch_name="b2"
+            )
+            no_pid = store.create_run(
+                repo_name="octo/one", issue_number=3, issue_title="c", issue_url="u3", branch_name="b3"
+            )
+            store.update_run(alive, state="running", supervisor_pid=111)
+            store.update_run(dead, state="running", supervisor_pid=222)
+            store.update_run(no_pid, state="running")
+            scheduler._pid_alive = staticmethod(lambda pid: pid == 111)
+
+            failed = scheduler.reconcile_orphans()
+
+            self.assertEqual(set(failed), {dead, no_pid})
+            self.assertEqual(store.get_run(alive)["state"], "running")
+            self.assertEqual(store.get_run(dead)["state"], "failed")
+            self.assertIn("orphaned", store.get_run(dead)["last_error"])
+            self.assertEqual(store.get_run(no_pid)["state"], "failed")
+
+    def test_pid_alive_false_for_unused_pid(self):
+        self.assertFalse(Scheduler._pid_alive(2_000_000_000))
+        self.assertFalse(Scheduler._pid_alive(0))
+
+
 if __name__ == "__main__":
     unittest.main()

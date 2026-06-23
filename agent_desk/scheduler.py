@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import subprocess
+import sys
 import threading
 from typing import Callable
 
@@ -14,6 +17,14 @@ from .worker import Worker, slugify
 
 
 MAX_CI_FIX_ATTEMPTS = 3
+
+# Maps an internal dispatch target to the detached job kind run-job understands.
+JOB_KIND_BY_TARGET = {
+    "_run_worker_for_issue": "issue",
+    "_run_approve_finish": "approve-finish",
+    "_run_auto_finish": "auto-finish",
+    "_run_ci_fix": "ci-fix",
+}
 CLOSEOUT_STAGES = {
     "approve-finish queued",
     "approve-finish",
@@ -62,12 +73,18 @@ class Scheduler:
         github: GitHubClient | None = None,
         worker: Worker | None = None,
         continuation_factory: Callable[[AgentDeskConfig, Store], ContinuationRunner] | None = None,
+        config_path: Path | None = None,
+        detach_jobs: bool = False,
     ):
         self.config = config
         self.store = store
         self.github = github or GitHubClient()
         self.worker = worker or Worker(config, store)
         self.continuation_factory = continuation_factory or (lambda config, store: ContinuationRunner(config, store))
+        # When True (server + run-job child), jobs run as detached processes so a
+        # server restart cannot kill them; otherwise they run in a daemon thread.
+        self.config_path = Path(config_path) if config_path else None
+        self.detach_jobs = detach_jobs
         self._paused = False
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -124,6 +141,10 @@ class Scheduler:
             return settings.as_payload()
 
     def serve_forever(self) -> None:
+        try:
+            self.reconcile_orphans()
+        except Exception:
+            pass
         while not self._stop.is_set():
             if not self._paused:
                 try:
@@ -362,8 +383,116 @@ class Scheduler:
         return RunNextResult(True, f"Started issue #{issue_number}", run_id)
 
     def _start_daemon_thread(self, target, kwargs):
+        if self.detach_jobs:
+            self._spawn_detached_job(int(kwargs["run_id"]), JOB_KIND_BY_TARGET[target.__name__])
+            return
         thread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
         thread.start()
+
+    def _run_dir_for(self, run: dict) -> Path:
+        return self.config.data_dir / "runs" / f"issue-{run['issue_number']}" / f"run-{run['attempt']}"
+
+    def _spawn_detached_job(self, run_id: int, kind: str) -> None:
+        """Launch ``agent-desk run-job`` in its own session so it outlives the server."""
+        if self.config_path is None:
+            raise RuntimeError("detach_jobs requires config_path to spawn run-job processes")
+        run = self.store.get_run(run_id)
+        run_dir = self._run_dir_for(run)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        argv = [
+            sys.executable,
+            "-m",
+            "agent_desk",
+            "run-job",
+            "--config",
+            str(self.config_path),
+            "--run-id",
+            str(run_id),
+            "--kind",
+            kind,
+        ]
+        log = (run_dir / "supervisor.log").open("a", encoding="utf-8")
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log.close()
+        self.store.update_run(run_id, supervisor_pid=process.pid)
+
+    def run_job(self, run_id: int, kind: str) -> None:
+        """Execute one detached job synchronously; reconstructs args from the record.
+
+        This is the body a ``run-job`` process runs. Each ``_run_*`` already
+        catches its own exceptions and records a ``failed`` state.
+        """
+        run = self.store.get_run(run_id)
+        if kind == "issue":
+            repo = self._repo_for_run(run)
+            self._run_worker_for_issue(
+                run_id=run_id,
+                repo=repo,
+                issue_number=int(run["issue_number"]),
+                issue_title=str(run["issue_title"]),
+                issue_body=str(run.get("issue_body") or ""),
+                issue_url=str(run["issue_url"]),
+                branch_name=str(run["branch_name"]),
+            )
+        elif kind == "approve-finish":
+            self._run_approve_finish(run_id=run_id)
+        elif kind == "auto-finish":
+            self._run_auto_finish(run_id=run_id)
+        elif kind == "ci-fix":
+            repo = self._repo_for_run(run)
+            pr_status = self.github.pr_checks_status(repo.name, str(run["pr_url"]))
+            self._run_ci_fix(run_id=run_id, pr_status=pr_status, attempt=int(run.get("ci_fix_attempts") or 1))
+        else:
+            raise ValueError(f"unknown job kind: {kind}")
+
+    def reconcile_orphans(self) -> list[int]:
+        """Fail runs left ``running`` by a supervisor that is no longer alive.
+
+        Called once at server startup, before polling. A run whose supervisor PID
+        is still alive (the server restarted but the job kept going) is left
+        untouched. Returns the run ids that were failed.
+        """
+        failed: list[int] = []
+        for run in self.store.list_runs({"running"}):
+            pid = run.get("supervisor_pid")
+            if pid and self._pid_alive(int(pid)):
+                continue
+            run_id = int(run["id"])
+            self.store.update_run(
+                run_id,
+                state="failed",
+                stage="failed",
+                last_error="Run orphaned: supervisor not running after server restart",
+            )
+            self.store.add_event(
+                run_id,
+                "error",
+                "orphan",
+                "Marked failed after server restart (no live supervisor)",
+                {"supervisor_pid": pid},
+            )
+            failed.append(run_id)
+        return failed
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
     def _repo_for_run(self, run: dict) -> RepoConfig:
         for repo in self.config.repos:

@@ -47,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     open_pr.add_argument("--config", default="config/repos.toml")
     open_pr.add_argument("--run-id", type=int, required=True)
 
+    # Internal: a detached supervisor process for one run, spawned by the server.
+    run_job = sub.add_parser("run-job", help="(internal) run one detached job for a run")
+    run_job.add_argument("--config", default="config/repos.toml")
+    run_job.add_argument("--run-id", type=int, required=True)
+    run_job.add_argument("--kind", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "init-config":
         path = Path(args.path)
@@ -78,8 +84,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     config = load_config(args.config)
+    config_path = Path(args.config).expanduser().resolve()
     store = Store(config.data_dir / "agent-desk.sqlite")
-    scheduler = Scheduler(config, store)
+    # serve and run-job dispatch work as detached processes that outlive the
+    # server; the one-shot commands run their work inline.
+    detach_jobs = args.command in {"serve", "run-job"}
+    scheduler = Scheduler(config, store, config_path=config_path, detach_jobs=detach_jobs)
     if args.command == "run-next":
         result = scheduler.run_next()
         print(result.message)
@@ -88,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
         result = ContinuationRunner(config, store).open_pull_request(args.run_id)
         print(result.message)
         return 0 if result.ok else 1
+    if args.command == "run-job":
+        scheduler.run_job(args.run_id, args.kind)
+        return 0
     if args.command == "serve":
         host = args.host or config.dashboard_host
         port = args.port or config.dashboard_port

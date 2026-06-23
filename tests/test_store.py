@@ -121,6 +121,41 @@ class StoreTests(unittest.TestCase):
             # A finished/failed run is not an open run.
             self.assertIsNone(store.find_open_run("octo/example", 5))
 
+    def test_counter_stays_monotonic_under_concurrent_threads(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            results: list[int] = []
+            lock = threading.Lock()
+
+            def grab():
+                value = store._next("widget")
+                with lock:
+                    results.append(value)
+
+            threads = [threading.Thread(target=grab) for _ in range(25)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            # File lock + in-process lock guarantee no duplicate or skipped ids.
+            self.assertEqual(sorted(results), list(range(1, 26)))
+
+    def test_next_falls_back_without_fcntl(self):
+        import agent_desk.store as store_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            original = store_module.fcntl
+            store_module.fcntl = None
+            try:
+                self.assertEqual(store._next("gadget"), 1)
+                self.assertEqual(store._next("gadget"), 2)
+            finally:
+                store_module.fcntl = original
+
 
 if __name__ == "__main__":
     unittest.main()

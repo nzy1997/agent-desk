@@ -125,5 +125,26 @@ class AddRepoCliTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 2)
 
 
+class RunJobCliTests(unittest.TestCase):
+    def test_run_job_dispatches_to_scheduler(self):
+        from agent_desk.scheduler import Scheduler
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "existing").mkdir()
+            config_path = root / "repos.toml"
+            config_path.write_text(MINIMAL_CONFIG.format(clone_root=root / "clones"), encoding="utf-8")
+            calls = []
+            original = Scheduler.run_job
+            Scheduler.run_job = lambda self, run_id, kind: calls.append((run_id, kind))
+            try:
+                code, _ = run_cli(["run-job", "--config", str(config_path), "--run-id", "12", "--kind", "issue"])
+            finally:
+                Scheduler.run_job = original
+
+            self.assertEqual(code, 0)
+            self.assertEqual(calls, [(12, "issue")])
+
+
 if __name__ == "__main__":
     unittest.main()
