@@ -145,6 +145,22 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("JSON.parse", html)
         self.assertIn("setInterval(tick", html)
 
+    def test_run_viewer_renders_codex_items_as_terminal_transcript(self):
+        html = run_viewer_html(7, "stdout.jsonl")
+        # Merges item.started/item.completed by id so each item renders once.
+        self.assertIn("item.started", html)
+        self.assertIn("item.completed", html)
+        # Renders command output (aggregated_output) and structured messages,
+        # not just a single flattened text field.
+        self.assertIn("aggregated_output", html)
+        self.assertIn("renderCommand", html)
+        self.assertIn("renderMessage", html)
+        self.assertIn("renderFileChange", html)
+        # Strips ANSI control sequences for a clean terminal feel.
+        self.assertIn("function clean", html)
+        # Terminal blocks preserve real newlines.
+        self.assertIn("white-space: pre-wrap", html)
+
     def test_state_payload_includes_resume_command_from_stored_thread_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

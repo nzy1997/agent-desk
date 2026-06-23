@@ -86,6 +86,25 @@ class DashboardFsTests(unittest.TestCase):
             self.assertEqual(data["path"], str(root))
             self.assertEqual(data["parent"], str(root.parent))
 
+    def test_fs_listing_reports_whether_current_dir_is_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            repo = root / "repo"
+            (repo / ".git").mkdir(parents=True)
+            store = Store(root / "desk.sqlite")
+            host, port = self._serve(store=store)
+
+            plain = self._get(host, port, "/api/fs?path=" + str(root))
+            inside = self._get(host, port, "/api/fs?path=" + str(repo))
+
+            self.assertFalse(plain["is_git"])
+            self.assertTrue(inside["is_git"])
+
+    def test_html_exposes_breadcrumb_and_repo_select_controls(self):
+        self.assertIn("crumbHtml", HTML)
+        self.assertIn("fs-crumb", HTML)
+        self.assertIn("Select this repo", HTML)
+
     def test_fs_listing_rejects_non_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "file.txt"
