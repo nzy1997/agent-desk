@@ -23,16 +23,21 @@ This MVP uses only the Python standard library plus local command-line tools:
 
 ## Quick Start
 
+Generate a local config from the committed template
+(`config/repos.example.toml`):
+
 ```bash
-python3 -m agent_desk init-config
+make init        # or: python3 -m agent_desk init-config
 ```
 
-Edit `config/repos.toml` so the target repository and local clone path are correct.
+`config/repos.toml` is machine-specific and git-ignored — it is yours to edit
+and is never committed. Edit it so the target repository and local clone path
+are correct.
 
 Start the dashboard:
 
 ```bash
-python3 -m agent_desk serve --config config/repos.toml
+make serve       # or: python3 -m agent_desk serve --config config/repos.toml
 ```
 
 Run one issue manually:

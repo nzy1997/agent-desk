@@ -1,0 +1,27 @@
+[agent_desk]
+data_dir = ".agent-desk"
+poll_interval_seconds = 60
+dashboard_host = "127.0.0.1"
+dashboard_port = 8765
+worker_timeout_seconds = 7200
+worker_idle_timeout_seconds = 600
+
+[[repos]]
+name = "OWNER/REPO"
+local_path = "/absolute/path/to/local/clone"
+base_branch = "main"
+ready_label = "agent:ready"
+running_label = "agent:running"
+pr_open_label = "agent:pr-open"
+blocked_label = "agent:blocked"
+needs_review_label = "agent:needs-human-review"
+test_command = "python -m unittest"
+auto_start_ready = false
+max_concurrent_runs = 1
+requires_human_review = true
+single_closeout_per_workspace = true
+
+# Keep both false until you are comfortable with the loop.
+mutate_github = false
+push_pr = false
+closeout_sandbox = "workspace-write"
