@@ -35,6 +35,7 @@ JOB_KIND_BY_TARGET = {
     "_run_approve_finish": "approve-finish",
     "_run_auto_finish": "auto-finish",
     "_run_ci_fix": "ci-fix",
+    "_run_resume_interrupted": "resume-interrupted",
 }
 CLOSEOUT_STAGES = {
     "approve-finish queued",
@@ -688,6 +689,28 @@ class Scheduler:
             self._start_daemon_thread(self._run_request_changes, {"run_id": run_id})
             return RunNextResult(True, "Request changes started", run_id)
 
+    def resume_interrupted(self, run_id: int) -> RunNextResult:
+        with self._lock:
+            if self._paused:
+                return RunNextResult(False, "Scheduler is paused", run_id)
+            run = self.store.get_run(run_id)
+            if run["state"] != "interrupted":
+                return RunNextResult(False, f"Run #{run_id} is not interrupted", run_id)
+            if not str(run.get("codex_thread_id") or ""):
+                return RunNextResult(False, "resume requires codex_thread_id", run_id)
+            if not str(run.get("worktree_path") or ""):
+                return RunNextResult(False, "resume requires worktree_path", run_id)
+            self.store.update_run(run_id, state="running", stage="resume-interrupted queued", last_error="")
+            self.store.add_event(
+                run_id,
+                "info",
+                "resume-interrupted",
+                "Starting interrupted run resume",
+                {},
+            )
+            self._start_daemon_thread(self._run_resume_interrupted, {"run_id": run_id})
+            return RunNextResult(True, "Resume interrupted started", run_id)
+
     def auto_start_ready_runs(self, workspace_path: str | Path | None = None) -> list[RunNextResult]:
         results: list[RunNextResult] = []
         with self._lock:
@@ -838,6 +861,8 @@ class Scheduler:
             repo = self._repo_for_run(run)
             pr_status = self.github.pr_checks_status(repo.name, str(run["pr_url"]))
             self._run_ci_fix(run_id=run_id, pr_status=pr_status, attempt=int(run.get("ci_fix_attempts") or 1))
+        elif kind == "resume-interrupted":
+            self._run_resume_interrupted(run_id=run_id)
         else:
             raise ValueError(f"unknown job kind: {kind}")
 
@@ -1094,6 +1119,20 @@ class Scheduler:
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "request-changes", "Request changes failed", {"detail": str(exc)})
+
+    def _run_resume_interrupted(self, *, run_id: int) -> None:
+        try:
+            result = self.continuation_factory(self.config, self.store).resume_interrupted(run_id)
+            self._start_ci_fix_if_closeout_blocked_by_failed_checks(run_id, result)
+        except Exception as exc:
+            self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
+            self.store.add_event(
+                run_id,
+                "error",
+                "resume-interrupted",
+                "Interrupted run resume failed",
+                {"detail": str(exc)},
+            )
 
     def _run_approve_finish(self, *, run_id: int) -> None:
         try:

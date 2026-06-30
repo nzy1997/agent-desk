@@ -121,6 +121,15 @@ class FailingSpawnScheduler(Scheduler):
         raise RuntimeError(f"spawn failed for {kind}")
 
 
+class SpawnRecordingScheduler(Scheduler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.spawned = []
+
+    def _spawn_detached_job(self, run_id: int, kind: str) -> None:
+        self.spawned.append({"run_id": run_id, "kind": kind})
+
+
 class RecordingDependencyExtractor:
     def __init__(self, graph: DependencyGraph):
         self.graph = graph
@@ -665,6 +674,44 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue(Path(result["manifest_path"]).exists())
             self.assertTrue((run_dir / f"shutdown-{result['shutdown_id']}.json").exists())
             self.assertEqual(result["signal_results"][0]["result"], "killed")
+
+    def test_resume_interrupted_dispatches_detached_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=5,
+                issue_title="Shutdown",
+                issue_url="u5",
+                branch_name="b5",
+            )
+            worktree = root / "worktree"
+            worktree.mkdir()
+            store.update_run(
+                run_id,
+                state="interrupted",
+                stage="interrupted by shutdown",
+                codex_thread_id="thread",
+                worktree_path=str(worktree),
+            )
+            scheduler = SpawnRecordingScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=FakeGitHub(),
+                config_path=root / "repos.toml",
+                detach_jobs=True,
+            )
+
+            result = scheduler.resume_interrupted(run_id)
+
+            self.assertTrue(result.started)
+            self.assertEqual(store.get_run(run_id)["state"], "running")
+            self.assertEqual(store.get_run(run_id)["stage"], "resume-interrupted queued")
+            self.assertEqual(scheduler.spawned[-1]["kind"], "resume-interrupted")
 
     def test_worker_completion_does_not_touch_github_labels(self):
         with tempfile.TemporaryDirectory() as tmp:

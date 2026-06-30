@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
-from agent_desk.continuation import ContinuationRunner
+from agent_desk.continuation import ContinuationRunner, render_resume_interrupted_prompt
 from agent_desk.github_client import PullRequestChecksStatus
 from agent_desk.store import Store
 from agent_desk.worker import CommandResult, FakeCommandRunner
@@ -46,6 +46,74 @@ class ContinuationTests(unittest.TestCase):
             pr_url="https://github.com/octo/example/pull/9",
         )
         return config, store, run_id, worktree
+
+    def test_render_resume_interrupted_prompt_points_to_shutdown_context(self):
+        run = {
+            "id": 7,
+            "repo_name": "octo/example",
+            "issue_number": 5,
+            "issue_title": "Shutdown",
+            "run_dir": "/tmp/run-7",
+            "worktree_path": "/tmp/worktree",
+            "stage": "interrupted by shutdown",
+        }
+
+        prompt = render_resume_interrupted_prompt(run)
+
+        self.assertIn("controlled Agent Desk shutdown", prompt)
+        self.assertIn("/tmp/run-7", prompt)
+        self.assertIn("/tmp/worktree", prompt)
+        self.assertIn("worker-result.schema.json", prompt)
+
+    def test_resume_interrupted_resumes_thread_and_opens_pr_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            worktree = root / "worktree"
+            worktree.mkdir()
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Shutdown",
+                issue_url="u5",
+                branch_name="b5",
+            )
+            store.update_run(
+                run_id,
+                state="interrupted",
+                stage="interrupted by shutdown",
+                run_dir=str(run_dir),
+                worktree_path=str(worktree),
+                codex_thread_id="thread",
+            )
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        (
+                            '{"status":"done","summary":"resumed","tests":[],'
+                            '"questions":[],"risks":[],'
+                            '"pr_url":"https://example.test/pr/1","decision_log":[]}'
+                        ),
+                        "",
+                    )
+                ]
+            )
+            config = AgentDeskConfig(
+                data_dir=root,
+                repos=[RepoConfig(name="octo/example", local_path=root)],
+            )
+
+            result = ContinuationRunner(config, store, runner=runner).resume_interrupted(run_id)
+            run = store.get_run(run_id)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(run["state"], "pr_open")
+        self.assertEqual(run["pr_url"], "https://example.test/pr/1")
+        self.assertTrue(any("resume-interrupted" in arg for arg in runner.calls[0].argv))
 
     def test_request_changes_resumes_original_codex_thread_with_feedback(self):
         with tempfile.TemporaryDirectory() as tmp:
