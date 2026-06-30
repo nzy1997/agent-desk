@@ -183,7 +183,7 @@ class Worker:
         branch_name: str,
     ) -> WorkerResult:
         run = self.store.get_run(run_id)
-        run_dir = self.config.data_dir / "runs" / f"issue-{issue_number}" / f"run-{run['attempt']}"
+        run_dir = run_directory(self.config.data_dir, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         worktree_path = self._worktree_path(repo, issue_number, branch_name, run["attempt"])
         prompt = render_worker_prompt(
@@ -416,6 +416,10 @@ def format_resume_command(thread_id: str, worktree_path: str) -> str:
             shlex.quote(thread_id),
         ]
     )
+
+
+def run_directory(data_dir: Path, run_id: int) -> Path:
+    return data_dir / "runs" / f"run-{run_id}"
 
 
 def slugify(value: str) -> str:

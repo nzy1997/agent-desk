@@ -151,6 +151,24 @@ class GitHubClient:
         state, summary = summarize_checks(checks)
         return PullRequestChecksStatus(state=state, summary=summary, head_sha=pr_view.head_sha, checks=checks)
 
+    def pull_request_exists(self, repo: str, pr_url: str) -> bool:
+        pr_number = parse_pr_number(pr_url)
+        if not pr_number:
+            return False
+        completed = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--repo", repo, "--json", "url"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if not completed.stdout.strip():
+            return False
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return False
+        return bool(payload.get("url"))
+
     def _pr_view_status(self, repo: str, pr_number: str) -> PullRequestViewStatus:
         completed = subprocess.run(
             ["gh", "pr", "view", pr_number, "--repo", repo, "--json", "headRefOid,mergeable,mergeStateStatus"],

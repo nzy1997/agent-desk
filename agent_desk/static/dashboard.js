@@ -129,43 +129,66 @@ function renderIssuePicker(repo, issues) {
   const rows = issues.map(issue => {
     const badge = issue.on_desk ? '<span class="issue-badge">on desk</span>' : '';
     const attrs = issue.on_desk ? 'checked disabled' : '';
+    const blocked = blockedByText(issue.blocked_by || []);
+    const dependencyHtml = blocked
+      ? `<div class="issue-body" style="display:block">Blocked by ${esc(blocked)}</div>`
+      : '';
     const body = String(issue.body || '').trim();
     const bodyHtml = body
       ? `<div class="issue-body" id="body-${issue.number}" style="display:none">${esc(body)}</div>`
+      : '';
+    const remove = issue.removable
+      ? `<button class="issue-remove" onclick="removeIssue(${issue.number})">Remove</button>`
       : '';
     return `<div class="issue-row ${issue.on_desk ? 'on-desk' : ''}">
       <input type="checkbox" value="${issue.number}" ${attrs}>
       <span class="issue-title" onclick="toggleBody(${issue.number})"><strong>#${issue.number}</strong> ${esc(issue.title)}</span>
       ${badge}
+      ${remove}
+      ${dependencyHtml}
       ${bodyHtml}
     </div>`;
   }).join('');
   picker.innerHTML = `<div class="issue-picker">
     <div class="issue-head">
       <strong>${esc(repo)}</strong>
-      <button class="primary" onclick="addSelected()">Add selected</button>
+      <button class="primary" onclick="addSelected('analyze')">Analyze dependencies</button>
+      <button onclick="addSelected('direct')">Add all directly</button>
     </div>
     <div class="issue-list">${rows}</div>
   </div>`;
+}
+function blockedByText(items) {
+  if (!items || !items.length) return '';
+  return items.map(item => {
+    const repo = item.repo || '';
+    const number = item.number || '';
+    const state = item.state ? ` (${item.state})` : '';
+    return `${repo ? repo + '#' : '#'}${number}${state}`;
+  }).join(', ');
 }
 function toggleBody(number) {
   const el = document.getElementById('body-' + number);
   if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
-async function addSelected() {
+async function addSelected(mode) {
   const repo = currentRepoName;
   if (!repo) { alert('Select a project folder first'); return; }
   const picker = document.getElementById('issue-picker');
   const checked = [...picker.querySelectorAll('input[type=checkbox]:checked:not([disabled])')];
   const issues = checked.map(box => parseInt(box.value, 10)).filter(Number.isInteger);
   if (!issues.length) { alert('Select at least one issue to add'); return; }
-  const btn = picker.querySelector('.issue-head button');
-  if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+  const buttons = [...picker.querySelectorAll('.issue-head button')];
+  const activeText = mode === 'direct' ? 'Adding…' : 'Analyzing…';
+  buttons.forEach(btn => { btn.disabled = true; });
+  const active = buttons.find(btn => btn.getAttribute('onclick')?.includes(`'${mode}'`));
+  const originalText = active ? active.textContent : '';
+  if (active) active.textContent = activeText;
   try {
     const res = await fetch('/api/actions/include-issues', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo, issues })
+      body: JSON.stringify({ repo, issues, dependency_mode: mode || 'analyze' })
     });
     const result = await res.json().catch(() => ({}));
     if (!res.ok) { alert(result.message || 'Could not add the selected issues'); return; }
@@ -173,21 +196,29 @@ async function addSelected() {
     alert(error.message || String(error));
     return;
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Add selected'; }
+    buttons.forEach(btn => { btn.disabled = false; });
+    if (active) active.textContent = originalText;
   }
-  // Mark added rows on-desk in place — no second GitHub round-trip.
-  checked.forEach(box => {
-    box.checked = true;
-    box.disabled = true;
-    const row = box.closest('.issue-row');
-    if (row && !row.querySelector('.issue-badge')) {
-      row.classList.add('on-desk');
-      const badge = document.createElement('span');
-      badge.className = 'issue-badge';
-      badge.textContent = 'on desk';
-      row.appendChild(badge);
-    }
-  });
+  await loadIssues();
+  await refresh();
+}
+async function removeIssue(number, repoName) {
+  const repo = repoName || currentRepoName;
+  if (!repo) { alert('Select a project folder first'); return; }
+  try {
+    const res = await fetch('/api/actions/remove-issue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, issue: number })
+    });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(result.message || 'Could not remove the issue'); return; }
+    if (!result.started) { alert(result.message || 'Issue cannot be removed'); return; }
+  } catch (error) {
+    alert(error.message || String(error));
+    return;
+  }
+  if (repo === currentRepoName) await loadIssues();
   await refresh();
 }
 async function toggleBrowser() {
@@ -367,7 +398,15 @@ function prStatus(run) {
 }
 function runActions(run) {
   if (run.state === 'ready') {
-    return `<div class="run-actions"><button class="primary" onclick="action('/api/run/${run.id}/start')">Run</button></div>`;
+    return `<div class="run-actions">
+      <button class="primary" onclick="action('/api/run/${run.id}/start')">Run</button>
+      <button onclick="removeIssue(${run.issue_number}, ${jsString(run.repo_name)})">Remove</button>
+    </div>`;
+  }
+  if (run.state === 'blocked' && run.stage === 'waiting for dependencies') {
+    return `<div class="run-actions">
+      <button onclick="removeIssue(${run.issue_number}, ${jsString(run.repo_name)})">Remove</button>
+    </div>`;
   }
   if (run.state === 'pr_open') {
     return `<textarea id="feedback-${run.id}" class="feedback-box" placeholder="Review feedback"></textarea>
@@ -379,11 +418,13 @@ function runActions(run) {
   return '';
 }
 function runHtml(run) {
+  const blocked = blockedByText(run.blocked_by || []);
   return `<div class="run">
     <strong>#${run.issue_number} ${esc(run.issue_title)}</strong>
     <div class="muted">${esc(run.repo_name)} · ${esc(run.branch_name)}</div>
     <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
     <div>Stage: ${esc(run.stage)}</div>
+    ${blocked ? `<div class="muted">Blocked by ${esc(blocked)}</div>` : ''}
     ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
     ${prStatus(run)}
     ${resumeCommand(run)}

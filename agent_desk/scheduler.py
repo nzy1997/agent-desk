@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import threading
-from typing import Callable
+from typing import Any, Callable
 
 from .config import AgentDeskConfig, RepoConfig
 from .continuation import ContinuationRunner
+from .dependencies import Dependency, DependencyGraph, parse_dependency_result, render_dependency_prompt
 from .github_client import GitHubClient
 from .github_client import PullRequestChecksStatus
 from .store import Store, utc_now
-from .worker import Worker, slugify
+from .worker import CommandRunner, Worker, parse_json_object, slugify
 
 
 MAX_CI_FIX_ATTEMPTS = 3
@@ -50,7 +52,7 @@ class SchedulerSettings:
     @classmethod
     def from_repo(cls, repo: RepoConfig) -> "SchedulerSettings":
         return cls(
-            auto_start_ready=repo.auto_start_ready,
+            auto_start_ready=False,
             max_concurrent_runs=max(1, repo.max_concurrent_runs),
             requires_human_review=repo.requires_human_review,
             single_closeout_per_workspace=repo.single_closeout_per_workspace,
@@ -73,6 +75,7 @@ class Scheduler:
         github: GitHubClient | None = None,
         worker: Worker | None = None,
         continuation_factory: Callable[[AgentDeskConfig, Store], ContinuationRunner] | None = None,
+        dependency_extractor: Callable[[str, list[dict[str, Any]]], DependencyGraph] | None = None,
         config_path: Path | None = None,
         detach_jobs: bool = False,
     ):
@@ -81,6 +84,8 @@ class Scheduler:
         self.github = github or GitHubClient()
         self.worker = worker or Worker(config, store)
         self.continuation_factory = continuation_factory or (lambda config, store: ContinuationRunner(config, store))
+        self.dependency_runner = getattr(self.worker, "runner", CommandRunner())
+        self.dependency_extractor = dependency_extractor or self._extract_dependencies_with_codex
         # When True (server + run-job child), jobs run as detached processes so a
         # server restart cannot kill them; otherwise they run in a daemon thread.
         self.config_path = Path(config_path) if config_path else None
@@ -155,6 +160,7 @@ class Scheduler:
 
     def poll_once(self) -> list[RunNextResult]:
         results = []
+        results.extend(self.unlock_ready_dependencies())
         results.extend(self.auto_start_ready_runs())
         results.extend(self.monitor_prs())
         return results
@@ -198,7 +204,12 @@ class Scheduler:
                 "title": str(record.get("issue_title") or ""),
                 "body": str(record.get("issue_body") or ""),
                 "url": str(record.get("issue_url") or ""),
+                "state": str(record.get("state") or ""),
                 "on_desk": record["state"] != "available",
+                "removable": self._can_remove_from_desk(record),
+                "dependency_state": str(record.get("dependency_state") or ""),
+                "blocked_by": record.get("blocked_by") or [],
+                "dependencies": record.get("dependencies") or [],
             }
             for record in self.store.list_records(repo.name)
         ]
@@ -209,20 +220,267 @@ class Scheduler:
         Desk state is folder-driven, so this is a pure local file move with no
         GitHub call — the ``agent:ready`` label is no longer written.
         """
+        return self.mark_issues_ready(repo_name, [issue_number], dependency_mode="direct")[0]
+
+    def remove_issue_from_desk(self, repo_name: str, issue_number: int) -> RunNextResult:
+        repo = self._repo_by_name(repo_name)
+        if repo is None:
+            return RunNextResult(False, f"{repo_name} is not a configured repository")
         with self._lock:
-            repo = self._repo_by_name(repo_name)
-            if repo is None:
-                return RunNextResult(False, f"{repo_name} is not a configured repository")
-            open_run = self.store.find_open_run(repo.name, issue_number)
-            if open_run is not None:
-                return RunNextResult(True, f"{repo.name}#{issue_number} is already on the desk", open_run["id"])
             record = self.store.get_record(repo.name, issue_number)
-            if record is not None and record["state"] == "available":
-                run_id = self._promote_to_ready(repo, record)
-            else:
-                issue = record or self._fetch_issue(repo, issue_number)
-                run_id = self._create_ready_run(repo, issue_number, issue)
-            return RunNextResult(True, f"Added {repo.name}#{issue_number} to the desk", run_id)
+            if record is None:
+                return RunNextResult(False, f"{repo.name}#{issue_number} is not synced")
+            if record["state"] == "available":
+                return RunNextResult(True, f"{repo.name}#{issue_number} is already off the desk", record["id"])
+            if not self._can_remove_from_desk(record):
+                return RunNextResult(
+                    False,
+                    f"{repo.name}#{issue_number} is {record['state']} and cannot be removed from the desk",
+                    record["id"],
+                )
+            self.store.update_run(
+                record["id"],
+                state="available",
+                stage="",
+                branch_name="",
+                dependencies=[],
+                blocked_by=[],
+                dependency_state="",
+                last_error="",
+                ended_at="",
+            )
+            self.store.add_event(
+                record["id"],
+                "info",
+                "removed",
+                "Issue was removed from the desk",
+                {"repo": repo.name},
+            )
+            return RunNextResult(True, f"Removed {repo.name}#{issue_number} from the desk", record["id"])
+
+    def mark_issues_ready(
+        self,
+        repo_name: str,
+        issue_numbers: list[int],
+        *,
+        dependency_mode: str = "analyze",
+    ) -> list[RunNextResult]:
+        numbers = []
+        for raw_number in issue_numbers:
+            number = int(raw_number)
+            if number > 0 and number not in numbers:
+                numbers.append(number)
+        if not numbers:
+            return []
+        repo = self._repo_by_name(repo_name)
+        if repo is None:
+            return [RunNextResult(False, f"{repo_name} is not a configured repository")]
+        if dependency_mode == "direct":
+            with self._lock:
+                return [self._mark_issue_ready_direct(repo, number) for number in numbers]
+        if dependency_mode != "analyze":
+            raise ValueError(f"unknown dependency mode: {dependency_mode}")
+        issues = [self._issue_for_dependency_extraction(repo, number) for number in numbers]
+        try:
+            graph = self.dependency_extractor(repo.name, issues)
+        except Exception as error:
+            with self._lock:
+                return [
+                    self._mark_issue_blocked(
+                        repo,
+                        number,
+                        issues[index],
+                        dependencies=[],
+                        blocked_by=[{"repo": repo.name, "number": number, "state": "unknown"}],
+                        dependency_state="unknown",
+                        reason=f"dependency analysis failed: {error}",
+                    )
+                    for index, number in enumerate(numbers)
+                ]
+        deps_by_issue = {issue.number: issue.depends_on for issue in graph.issues}
+        with self._lock:
+            results = []
+            for index, number in enumerate(numbers):
+                deps = deps_by_issue.get(number, [])
+                blocked_by = self._unsatisfied_dependencies(repo, deps)
+                if blocked_by:
+                    result = self._mark_issue_blocked(
+                        repo,
+                        number,
+                        issues[index],
+                        dependencies=deps,
+                        blocked_by=blocked_by,
+                        dependency_state="blocked",
+                        reason="waiting for dependencies",
+                    )
+                else:
+                    result = self._mark_issue_ready_direct(
+                        repo,
+                        number,
+                        issue=issues[index],
+                        dependencies=deps,
+                        dependency_state="ready",
+                    )
+                results.append(result)
+            return results
+
+    def unlock_ready_dependencies(self) -> list[RunNextResult]:
+        results: list[RunNextResult] = []
+        with self._lock:
+            for record in reversed(self.store.list_runs({"blocked"})):
+                if str(record.get("dependency_state") or "") != "blocked":
+                    continue
+                try:
+                    repo = self._repo_for_run(record)
+                except KeyError:
+                    continue
+                deps = [
+                    Dependency(
+                        repo=str(dep.get("repo") or repo.name),
+                        number=int(dep.get("number") or 0),
+                        evidence=str(dep.get("evidence") or ""),
+                        confidence=str(dep.get("confidence") or ""),
+                    )
+                    for dep in record.get("dependencies", [])
+                    if int(dep.get("number") or 0) > 0
+                ]
+                blocked_by = self._unsatisfied_dependencies(repo, deps)
+                if blocked_by:
+                    self.store.update_run(record["id"], blocked_by=blocked_by)
+                    continue
+                run_id = self._promote_to_ready(
+                    repo,
+                    record,
+                    dependencies=[dep.as_payload() for dep in deps],
+                    blocked_by=[],
+                    dependency_state="ready",
+                )
+                results.append(RunNextResult(True, f"Unlocked {repo.name}#{record['issue_number']}", run_id))
+        return results
+
+    def _mark_issue_ready_direct(
+        self,
+        repo: RepoConfig,
+        issue_number: int,
+        *,
+        issue: dict | None = None,
+        dependencies: list[Dependency] | None = None,
+        dependency_state: str = "ready",
+    ) -> RunNextResult:
+        open_run = self.store.find_open_run(repo.name, issue_number)
+        if open_run is not None:
+            return RunNextResult(True, f"{repo.name}#{issue_number} is already on the desk", open_run["id"])
+        record = self.store.get_record(repo.name, issue_number)
+        payload = {
+            "dependencies": [dep.as_payload() for dep in dependencies or []],
+            "blocked_by": [],
+            "dependency_state": dependency_state,
+        }
+        if record is not None and record["state"] in {"available", "blocked"}:
+            run_id = self._promote_to_ready(repo, record, **payload)
+        else:
+            issue = issue or record or self._fetch_issue(repo, issue_number)
+            run_id = self._create_ready_run(repo, issue_number, issue, **payload)
+        return RunNextResult(True, f"Added {repo.name}#{issue_number} to the desk", run_id)
+
+    def _mark_issue_blocked(
+        self,
+        repo: RepoConfig,
+        issue_number: int,
+        issue: dict,
+        *,
+        dependencies: list[Dependency],
+        blocked_by: list[dict[str, Any]],
+        dependency_state: str,
+        reason: str,
+    ) -> RunNextResult:
+        record = self.store.get_record(repo.name, issue_number)
+        payload = {
+            "dependencies": [dep.as_payload() for dep in dependencies],
+            "blocked_by": blocked_by,
+            "dependency_state": dependency_state,
+            "last_error": reason,
+        }
+        if record is not None and record["state"] in {"available", "blocked"}:
+            run_id = self._promote_to_blocked(repo, record, **payload)
+        else:
+            run_id = self._create_blocked_run(repo, issue_number, issue, **payload)
+        return RunNextResult(False, f"{repo.name}#{issue_number} is waiting for dependencies", run_id)
+
+    def _issue_for_dependency_extraction(self, repo: RepoConfig, issue_number: int) -> dict:
+        record = self.store.get_record(repo.name, issue_number)
+        if record is not None:
+            return {
+                "number": int(record["issue_number"]),
+                "title": str(record.get("issue_title") or ""),
+                "body": str(record.get("issue_body") or ""),
+                "url": str(record.get("issue_url") or ""),
+            }
+        issue = self._fetch_issue(repo, issue_number)
+        return {
+            "number": issue_number,
+            "title": str(issue.get("title") or issue.get("issue_title") or ""),
+            "body": str(issue.get("body") or issue.get("issue_body") or ""),
+            "url": str(issue.get("url") or issue.get("issue_url") or ""),
+        }
+
+    def _unsatisfied_dependencies(self, repo: RepoConfig, dependencies: list[Dependency]) -> list[dict[str, Any]]:
+        blocked_by = []
+        for dep in dependencies:
+            if dep.number <= 0:
+                continue
+            if dep.repo != repo.name:
+                blocked_by.append({"repo": dep.repo, "number": dep.number, "state": "unknown"})
+                continue
+            record = self.store.get_record(dep.repo, dep.number)
+            if record is not None and record["state"] == "done":
+                continue
+            blocked_by.append(
+                {
+                    "repo": dep.repo,
+                    "number": dep.number,
+                    "state": str(record.get("state") if record else "unknown"),
+                }
+            )
+        return blocked_by
+
+    @staticmethod
+    def _can_remove_from_desk(record: dict[str, Any]) -> bool:
+        if record["state"] == "ready":
+            return True
+        return record["state"] == "blocked" and record.get("stage") == "waiting for dependencies"
+
+    def _extract_dependencies_with_codex(self, repo_name: str, issues: list[dict[str, Any]]) -> DependencyGraph:
+        prompt = render_dependency_prompt(repo_name, issues)
+        result_dir = self.config.data_dir / "dependency-extraction"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        result_path = result_dir / f"deps-{os.getpid()}-{threading.get_ident()}.json"
+        completed = self.dependency_runner.run(
+            [
+                "codex",
+                "--ask-for-approval",
+                "never",
+                "--sandbox",
+                "workspace-write",
+                "exec",
+                "--json",
+                "--output-last-message",
+                str(result_path),
+                "-",
+            ],
+            cwd=Path.cwd(),
+            stdin=prompt,
+            timeout=self.config.worker_timeout_seconds,
+            idle_timeout=self.config.worker_idle_timeout_seconds,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "codex dependency extraction failed")
+        output = result_path.read_text(encoding="utf-8") if result_path.exists() else completed.stdout
+        payload = parse_json_object(output)
+        if payload is None:
+            raise ValueError("codex dependency extraction returned no JSON")
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        return parse_dependency_result(text, default_repo=repo_name)
 
     def _fetch_issue(self, repo: RepoConfig, issue_number: int) -> dict:
         try:
@@ -230,17 +488,25 @@ class Scheduler:
         except RuntimeError:
             return {"number": issue_number}
 
-    def _promote_to_ready(self, repo: RepoConfig, record: dict) -> int:
+    def _promote_to_ready(self, repo: RepoConfig, record: dict, **fields: Any) -> int:
+        number = int(record["issue_number"])
+        title = str(record.get("issue_title") or f"Issue {number}")
+        branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
+        self.store.update_run(record["id"], state="ready", stage="waiting for human run", branch_name=branch, **fields)
+        self.store.add_event(record["id"], "info", "ready", "Issue is ready to run", {"repo": repo.name})
+        return record["id"]
+
+    def _promote_to_blocked(self, repo: RepoConfig, record: dict, **fields: Any) -> int:
         number = int(record["issue_number"])
         title = str(record.get("issue_title") or f"Issue {number}")
         branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
         self.store.update_run(
-            record["id"], state="ready", stage="waiting for human run", branch_name=branch
+            record["id"], state="blocked", stage="waiting for dependencies", branch_name=branch, **fields
         )
-        self.store.add_event(record["id"], "info", "ready", "Issue is ready to run", {"repo": repo.name})
+        self.store.add_event(record["id"], "info", "dependencies", "Issue is waiting for dependencies", fields)
         return record["id"]
 
-    def _create_ready_run(self, repo: RepoConfig, issue_number: int, issue: dict) -> int:
+    def _create_ready_run(self, repo: RepoConfig, issue_number: int, issue: dict, **fields: Any) -> int:
         title = str(issue.get("issue_title") or issue.get("title") or f"Issue {issue_number}")
         body = str(issue.get("issue_body") or issue.get("body") or "")
         url = str(issue.get("issue_url") or issue.get("url") or "")
@@ -254,8 +520,26 @@ class Scheduler:
             branch_name=branch,
             issue_body=body,
         )
-        self.store.update_run(run_id, state="ready", stage="waiting for human run")
+        self.store.update_run(run_id, state="ready", stage="waiting for human run", **fields)
         self.store.add_event(run_id, "info", "ready", "Issue is ready to run", {"repo": repo.name})
+        return run_id
+
+    def _create_blocked_run(self, repo: RepoConfig, issue_number: int, issue: dict, **fields: Any) -> int:
+        title = str(issue.get("issue_title") or issue.get("title") or f"Issue {issue_number}")
+        body = str(issue.get("issue_body") or issue.get("body") or "")
+        url = str(issue.get("issue_url") or issue.get("url") or "")
+        attempt = self.store.next_attempt(repo.name, issue_number)
+        branch = f"agent/issue-{issue_number}-{slugify(title)[:48]}-run-{attempt}"
+        run_id = self.store.create_run(
+            repo_name=repo.name,
+            issue_number=issue_number,
+            issue_title=title,
+            issue_url=url,
+            branch_name=branch,
+            issue_body=body,
+        )
+        self.store.update_run(run_id, state="blocked", stage="waiting for dependencies", **fields)
+        self.store.add_event(run_id, "info", "dependencies", "Issue is waiting for dependencies", fields)
         return run_id
 
     def run_next(self) -> RunNextResult:
@@ -365,21 +649,27 @@ class Scheduler:
         issue_body = str(run.get("issue_body") or "")
         self.store.add_event(run_id, "info", "claim", "Claimed issue", {"repo": repo.name})
         self.store.update_run(run_id, state="running", stage="claimed")
+        try:
+            self._start_daemon_thread(
+                self._run_worker_for_issue,
+                {
+                    "run_id": run_id,
+                    "repo": repo,
+                    "issue_number": issue_number,
+                    "issue_title": title,
+                    "issue_body": issue_body,
+                    "issue_url": issue_url,
+                    "branch_name": branch,
+                },
+            )
+        except Exception as exc:
+            message = f"Failed to start supervisor for issue #{issue_number}: {exc}"
+            self.store.update_run(run_id, state="failed", stage="failed", last_error=message, supervisor_pid="")
+            self.store.add_event(run_id, "error", "spawn-failed", message, {"repo": repo.name})
+            return RunNextResult(False, message, run_id)
         if repo.mutate_github:
             self.github.add_label(repo.name, issue_number, repo.running_label)
             self.github.remove_label(repo.name, issue_number, repo.ready_label)
-        self._start_daemon_thread(
-            self._run_worker_for_issue,
-            {
-                "run_id": run_id,
-                "repo": repo,
-                "issue_number": issue_number,
-                "issue_title": title,
-                "issue_body": issue_body,
-                "issue_url": issue_url,
-                "branch_name": branch,
-            },
-        )
         return RunNextResult(True, f"Started issue #{issue_number}", run_id)
 
     def _start_daemon_thread(self, target, kwargs):
@@ -399,6 +689,7 @@ class Scheduler:
         run = self.store.get_run(run_id)
         run_dir = self._run_dir_for(run)
         run_dir.mkdir(parents=True, exist_ok=True)
+        self.store.update_run(run_id, run_dir=str(run_dir))
         argv = [
             sys.executable,
             "-m",

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
 from agent_desk.dashboard import HTML, build_state_payload, run_viewer_html, serve_dashboard
+from agent_desk.dependencies import DependencyGraph, IssueDependencies
 from agent_desk.scheduler import Scheduler
 from agent_desk.store import Store
 
@@ -25,6 +26,19 @@ class _IncludeIssueGitHub:
 
     def add_label(self, repo, issue_number, label):
         self.added = (repo, issue_number, label)
+
+
+class _NoDependencyExtractor:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, repo_name, issues):
+        self.calls.append((repo_name, issues))
+        return DependencyGraph(
+            repo=repo_name,
+            issues=[IssueDependencies(number=int(issue["number"]), depends_on=[]) for issue in issues],
+            warnings=[],
+        )
 
 
 class DashboardTests(unittest.TestCase):
@@ -66,6 +80,30 @@ class DashboardTests(unittest.TestCase):
                 branch_name="agent/issue-2-ready",
             )
             store.update_run(ready_id, state="ready", stage="waiting for human run")
+            pr_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=4,
+                issue_title="PR",
+                issue_url="https://github.com/octo/example/issues/4",
+                branch_name="agent/issue-4-pr",
+            )
+            store.update_run(pr_id, state="pr_open", stage="pr_open")
+            failed_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Failed",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-failed",
+            )
+            store.update_run(failed_id, state="failed", stage="failed")
+            blocked_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=6,
+                issue_title="Blocked",
+                issue_url="https://github.com/octo/example/issues/6",
+                branch_name="agent/issue-6-blocked",
+            )
+            store.update_run(blocked_id, state="blocked", stage="blocked")
             done_id = store.create_run(
                 repo_name="octo/example",
                 issue_number=1,
@@ -77,7 +115,10 @@ class DashboardTests(unittest.TestCase):
 
             payload = build_state_payload(store)
 
-        self.assertEqual([run["state"] for run in payload["runs"]], ["running", "ready", "done"])
+        self.assertEqual(
+            [run["state"] for run in payload["runs"]],
+            ["running", "pr_open", "failed", "ready", "blocked", "done"],
+        )
 
     def test_state_payload_includes_workspace_scheduler_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,7 +144,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(
             payload["projects"][0]["settings"],
             {
-                "auto_start_ready": True,
+                "auto_start_ready": False,
                 "max_concurrent_runs": 2,
                 "requires_human_review": True,
                 "single_closeout_per_workspace": True,
@@ -309,9 +350,12 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("syncIssues()", HTML)
         self.assertIn("/api/actions/sync-issues", HTML)
         self.assertIn("renderIssuePicker(", HTML)
-        self.assertIn("addSelected()", HTML)
+        self.assertIn("addSelected('analyze')", HTML)
+        self.assertIn("addSelected('direct')", HTML)
         self.assertIn("toggleBody(", HTML)
         self.assertIn("/api/actions/include-issues", HTML)
+        self.assertIn("removeIssue(", HTML)
+        self.assertIn("/api/actions/remove-issue", HTML)
         self.assertIn("renderIssueTools(state)", HTML)
         self.assertIn("on desk", HTML)
         # Picker follows the selected project, not a separate repo dropdown.
@@ -432,7 +476,9 @@ class IssuePickerRouteTests(unittest.TestCase):
             data_dir=root / "data",
             repos=[RepoConfig(name="octo/example", local_path=root / "example")],
         )
-        scheduler = Scheduler(config, store, github=_IncludeIssueGitHub())
+        extractor = _NoDependencyExtractor()
+        scheduler = Scheduler(config, store, github=_IncludeIssueGitHub(), dependency_extractor=extractor)
+        scheduler.dependency_extractor_spy = extractor
         return store, scheduler
 
     def test_include_issue_route_labels_and_queues(self):
@@ -475,10 +521,21 @@ class IssuePickerRouteTests(unittest.TestCase):
             status, payload = self._request(port, "/api/issues?repo=octo/example")
             self.assertEqual({i["number"]: i["on_desk"] for i in payload["issues"]}, {5: False, 6: True})
 
+            # Removing it from the local desk makes it selectable again.
+            status, payload = self._request(port, "/api/actions/remove-issue", {"repo": "octo/example", "issue": 6})
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["started"])
+            status, payload = self._request(port, "/api/issues?repo=octo/example")
+            self.assertEqual({i["number"]: i["on_desk"] for i in payload["issues"]}, {5: False, 6: False})
+
             self.assertEqual(self._request(port, "/api/issues")[0], 400)
             self.assertEqual(self._request(port, "/api/issues?repo=octo/missing")[0], 404)
             self.assertEqual(self._request(port, "/api/actions/sync-issues", {})[0], 400)
             self.assertEqual(self._request(port, "/api/actions/sync-issues", {"repo": "octo/missing"})[0], 404)
+            self.assertEqual(self._request(port, "/api/actions/remove-issue", {"issue": 6})[0], 400)
+            self.assertEqual(
+                self._request(port, "/api/actions/remove-issue", {"repo": "octo/example", "issue": 0})[0], 400
+            )
 
     def test_run_view_route_renders_viewer_and_file_route_serves_raw(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -517,13 +574,35 @@ class IssuePickerRouteTests(unittest.TestCase):
                 port, "/api/actions/include-issues", {"repo": "octo/example", "issues": [5, 5, -1]}
             )
             self.assertEqual(status, 200)
+            self.assertEqual(payload["dependency_mode"], "analyze")
             self.assertEqual(payload["added"], 1)
+            self.assertEqual(payload["blocked"], 0)
             self.assertEqual(payload["requested"], 1)
+            self.assertEqual(len(scheduler.dependency_extractor_spy.calls), 1)
             self.assertEqual([run["issue_number"] for run in store.list_runs()], [5])
+
+            status, payload = self._request(
+                port,
+                "/api/actions/include-issues",
+                {"repo": "octo/example", "issues": [6], "dependency_mode": "direct"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["dependency_mode"], "direct")
+            self.assertEqual(payload["added"], 1)
+            self.assertEqual(len(scheduler.dependency_extractor_spy.calls), 1)
+            self.assertEqual([run["issue_number"] for run in store.list_runs()], [6, 5])
 
             self.assertEqual(self._request(port, "/api/actions/include-issues", {"issues": [5]})[0], 400)
             self.assertEqual(
                 self._request(port, "/api/actions/include-issues", {"repo": "octo/example", "issues": []})[0], 400
+            )
+            self.assertEqual(
+                self._request(
+                    port,
+                    "/api/actions/include-issues",
+                    {"repo": "octo/example", "issues": [5], "dependency_mode": "bogus"},
+                )[0],
+                400,
             )
 
 

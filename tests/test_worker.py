@@ -2,6 +2,7 @@ import tempfile
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
 from agent_desk.store import Store
@@ -9,6 +10,83 @@ from agent_desk.worker import CommandResult, CommandRunner, FakeCommandRunner, W
 
 
 class WorkerTests(unittest.TestCase):
+    def test_worker_uses_run_id_directory_for_same_issue_number_across_repos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rstim_path = root / "rstim"
+            suslin_path = root / "suslin"
+            rstim_path.mkdir()
+            suslin_path.mkdir()
+            config = AgentDeskConfig(data_dir=root / "data")
+            rstim = RepoConfig(
+                name="qudeleap/rstim",
+                local_path=rstim_path,
+                base_branch="main",
+                test_command="cargo test",
+                push_pr=False,
+            )
+            suslin = RepoConfig(
+                name="qudeleap/suslin",
+                local_path=suslin_path,
+                base_branch="main",
+                test_command="julia --project=. test/runtests.jl",
+                push_pr=False,
+            )
+            store = Store(root / "desk.sqlite")
+            rstim_run_id = store.create_run(
+                repo_name=rstim.name,
+                issue_number=169,
+                issue_title="Fix decoder",
+                issue_url="https://github.com/qudeleap/rstim/issues/169",
+                branch_name="agent/issue-169-fix-decoder",
+            )
+            suslin_run_id = store.create_run(
+                repo_name=suslin.name,
+                issue_number=169,
+                issue_title="Fix geometry",
+                issue_url="https://github.com/qudeleap/suslin/issues/169",
+                branch_name="agent/issue-169-fix-geometry",
+            )
+            runner = FakeCommandRunner(
+                results=[
+                    CommandResult(["git", "fetch"], 0, "", ""),
+                    CommandResult(["git", "worktree"], 0, "", ""),
+                    CommandResult(["codex", "exec"], 0, '{"status":"done","summary":"ok","tests":[],"questions":[]}', ""),
+                    CommandResult(["git", "fetch"], 0, "", ""),
+                    CommandResult(["git", "worktree"], 0, "", ""),
+                    CommandResult(["codex", "exec"], 0, '{"status":"done","summary":"ok","tests":[],"questions":[]}', ""),
+                ]
+            )
+
+            worker = Worker(config, store, runner)
+            worker.run_issue(
+                run_id=rstim_run_id,
+                repo=rstim,
+                issue_number=169,
+                issue_title="Fix decoder",
+                issue_body="Body",
+                issue_url="https://github.com/qudeleap/rstim/issues/169",
+                branch_name="agent/issue-169-fix-decoder",
+            )
+            worker.run_issue(
+                run_id=suslin_run_id,
+                repo=suslin,
+                issue_number=169,
+                issue_title="Fix geometry",
+                issue_body="Body",
+                issue_url="https://github.com/qudeleap/suslin/issues/169",
+                branch_name="agent/issue-169-fix-geometry",
+            )
+
+            rstim_run_dir = Path(store.get_run(rstim_run_id)["run_dir"])
+            suslin_run_dir = Path(store.get_run(suslin_run_id)["run_dir"])
+
+            self.assertEqual(rstim_run_dir, config.data_dir / "runs" / f"run-{rstim_run_id}")
+            self.assertEqual(suslin_run_dir, config.data_dir / "runs" / f"run-{suslin_run_id}")
+            self.assertNotEqual(rstim_run_dir, suslin_run_dir)
+            self.assertTrue((rstim_run_dir / "prompt.md").exists())
+            self.assertTrue((suslin_run_dir / "prompt.md").exists())
+
     def test_worker_invokes_codex_non_interactively_and_writes_transcript(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -55,8 +133,8 @@ class WorkerTests(unittest.TestCase):
             self.assertIn("workspace-write", codex_call.argv)
             self.assertEqual(codex_call.idle_timeout, config.worker_idle_timeout_seconds)
             self.assertEqual(result.status, "done")
-            self.assertTrue((config.data_dir / "runs" / "issue-7" / "run-1" / "prompt.md").exists())
-            self.assertTrue((config.data_dir / "runs" / "issue-7" / "run-1" / "stdout.jsonl").exists())
+            self.assertTrue((config.data_dir / "runs" / f"run-{run_id}" / "prompt.md").exists())
+            self.assertTrue((config.data_dir / "runs" / f"run-{run_id}" / "stdout.jsonl").exists())
 
     def test_worker_marks_run_pr_open_when_codex_returns_pr_url(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,15 +231,16 @@ class WorkerTests(unittest.TestCase):
                 ]
             )
 
-            Worker(config, store, runner).run_issue(
-                run_id=run_id,
-                repo=repo,
-                issue_number=9,
-                issue_title="Fallback PR",
-                issue_body="Body",
-                issue_url="https://github.com/octo/example/issues/9",
-                branch_name="agent/issue-9-fallback-pr",
-            )
+            with patch("agent_desk.github_client.GitHubClient.pull_request_exists", return_value=True):
+                Worker(config, store, runner).run_issue(
+                    run_id=run_id,
+                    repo=repo,
+                    issue_number=9,
+                    issue_title="Fallback PR",
+                    issue_body="Body",
+                    issue_url="https://github.com/octo/example/issues/9",
+                    branch_name="agent/issue-9-fallback-pr",
+                )
             run = store.get_run(run_id)
             codex_done_events = [
                 event
@@ -294,7 +373,7 @@ class WorkerTests(unittest.TestCase):
                 branch_name="agent/issue-11-resume-me",
             )
             run = store.get_run(run_id)
-            resume_log = config.data_dir / "runs" / "issue-11" / "run-1" / "codex-resume.txt"
+            resume_log = config.data_dir / "runs" / f"run-{run_id}" / "codex-resume.txt"
 
             self.assertEqual(result.status, "done")
             self.assertEqual(run["codex_thread_id"], thread_id)

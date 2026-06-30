@@ -9,6 +9,16 @@ from agent_desk.store import Store
 from agent_desk.worker import CommandResult, FakeCommandRunner
 
 
+class FakeGitHub:
+    def __init__(self, existing_pr_urls: set[str]):
+        self.existing_pr_urls = existing_pr_urls
+        self.checked: list[tuple[str, str]] = []
+
+    def pull_request_exists(self, repo: str, pr_url: str) -> bool:
+        self.checked.append((repo, pr_url))
+        return pr_url in self.existing_pr_urls
+
+
 class ContinuationTests(unittest.TestCase):
     def _store_with_pr_run(self, root: Path) -> tuple[AgentDeskConfig, Store, int, Path]:
         worktree = root / "worktree"
@@ -92,10 +102,11 @@ class ContinuationTests(unittest.TestCase):
             self.assertEqual(call.cwd, worktree)
             self.assertIn("Human approval has been granted", call.stdin)
             self.assertIn("Do not merge while checks are pending or failing", call.stdin)
-            self.assertIn("Inspect only open issues with the configured blocked label agent:blocked", call.stdin)
-            self.assertIn("Do not add agent:ready to unlabeled issues", call.stdin)
-            self.assertIn("remove agent:blocked", call.stdin)
-            self.assertIn("agent:ready", call.stdin)
+            self.assertIn("Do not inspect or modify follow-up issue labels", call.stdin)
+            self.assertIn("Agent Desk manages dependency unlocking locally", call.stdin)
+            self.assertNotIn("Inspect only open issues with the configured blocked label", call.stdin)
+            self.assertNotIn("Do not add agent:ready to unlabeled issues", call.stdin)
+            self.assertNotIn("remove agent:blocked", call.stdin)
             self.assertEqual(run["state"], "done")
             self.assertEqual(run["stage"], "finished")
 
@@ -187,7 +198,9 @@ class ContinuationTests(unittest.TestCase):
                 ]
             )
 
-            result = ContinuationRunner(config, store, runner).open_pull_request(run_id)
+            github = FakeGitHub(existing_pr_urls={"https://github.com/octo/example/pull/10"})
+
+            result = ContinuationRunner(config, store, runner, github=github).open_pull_request(run_id)
             call = runner.calls[0]
             run = store.get_run(run_id)
 
@@ -199,6 +212,37 @@ class ContinuationTests(unittest.TestCase):
             self.assertEqual(run["state"], "pr_open")
             self.assertEqual(run["stage"], "pull request opened")
             self.assertEqual(run["pr_url"], "https://github.com/octo/example/pull/10")
+            self.assertEqual(github.checked, [("octo/example", "https://github.com/octo/example/pull/10")])
+
+    def test_open_pull_request_blocks_when_reported_pr_url_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, _worktree = self._store_with_pr_run(root)
+            store.update_run(run_id, state="running", stage="codex done; resuming to open pull request", pr_url="")
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"opened PR","tests":[],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/128","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+            github = FakeGitHub(existing_pr_urls=set())
+
+            result = ContinuationRunner(config, store, runner, github=github).open_pull_request(run_id)
+            run = store.get_run(run_id)
+
+            self.assertFalse(result.ok)
+            self.assertEqual(github.checked, [("octo/example", "https://github.com/octo/example/pull/128")])
+            self.assertEqual(run["state"], "blocked")
+            self.assertEqual(run["stage"], "blocked")
+            self.assertEqual(run["pr_url"], "")
+            self.assertEqual(
+                run["last_error"],
+                "open-pr returned non-existent pr_url: https://github.com/octo/example/pull/128",
+            )
 
     def test_open_pull_request_blocks_when_resume_done_without_pr_url(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,7 +294,9 @@ class ContinuationTests(unittest.TestCase):
                 ]
             )
 
-            result = ContinuationRunner(config, store, runner).open_pull_request(run_id)
+            github = FakeGitHub(existing_pr_urls={"https://github.com/octo/example/pull/10"})
+
+            result = ContinuationRunner(config, store, runner, github=github).open_pull_request(run_id)
             call = runner.calls[0]
 
             self.assertTrue(result.ok)

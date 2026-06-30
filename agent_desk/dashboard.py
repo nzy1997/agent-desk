@@ -18,8 +18,12 @@ from .worker import extract_thread_id, format_resume_command
 
 RUN_DISPLAY_ORDER = {
     "running": 0,
-    "ready": 1,
-    "done": 3,
+    "pr_open": 1,
+    "needs_review": 2,
+    "failed": 3,
+    "ready": 4,
+    "blocked": 5,
+    "done": 6,
 }
 
 
@@ -242,16 +246,43 @@ def make_handler(
                         "issues must be a non-empty list of numbers",
                     )
                     return
-                results = [
-                    scheduler.mark_issue_ready(repo_name, number) for number in numbers
-                ]
+                dependency_mode = str(payload.get("dependency_mode") or "analyze")
+                try:
+                    results = scheduler.mark_issues_ready(
+                        repo_name, numbers, dependency_mode=dependency_mode
+                    )
+                except ValueError as exc:
+                    self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
                 added = sum(1 for result in results if result.started)
                 self._send_json(
                     {
                         "added": added,
+                        "blocked": len(results) - added,
+                        "dependency_mode": dependency_mode,
                         "requested": len(numbers),
                         "results": [result.__dict__ for result in results],
                     }
+                )
+                return
+            if path == "/api/actions/remove-issue":
+                payload = self._read_json()
+                repo_name = str(payload.get("repo") or "").strip()
+                if not repo_name:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                try:
+                    issue_number = int(payload.get("issue"))
+                except (TypeError, ValueError):
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issue must be a number")
+                    return
+                if issue_number <= 0:
+                    self.send_error(
+                        HTTPStatus.BAD_REQUEST, "issue must be a positive number"
+                    )
+                    return
+                self._send_json(
+                    scheduler.remove_issue_from_desk(repo_name, issue_number).__dict__
                 )
                 return
             if path.startswith("/api/run/") and path.endswith("/start"):

@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import AgentDeskConfig, RepoConfig
+from .github_client import GitHubClient
 from .github_client import PullRequestChecksStatus
 from .store import Store
-from .worker import CommandRunner, extract_thread_id, parse_json_object
+from .worker import CommandRunner, extract_thread_id, parse_json_object, run_directory
 
 
 @dataclass(frozen=True)
@@ -18,10 +19,17 @@ class ContinuationResult:
 
 
 class ContinuationRunner:
-    def __init__(self, config: AgentDeskConfig, store: Store, runner: CommandRunner | None = None):
+    def __init__(
+        self,
+        config: AgentDeskConfig,
+        store: Store,
+        runner: CommandRunner | None = None,
+        github: GitHubClient | None = None,
+    ):
         self.config = config
         self.store = store
         self.runner = runner or CommandRunner()
+        self.github = github or GitHubClient()
 
     def request_changes(self, run_id: int, feedback: str) -> ContinuationResult:
         run = self.store.get_run(run_id)
@@ -109,7 +117,7 @@ class ContinuationRunner:
         worktree_raw = str(run.get("worktree_path") or "")
         worktree_path = Path(worktree_raw)
         run_dir_raw = str(run.get("run_dir") or "")
-        run_dir = Path(run_dir_raw) if run_dir_raw else self.config.data_dir / "runs" / f"issue-{run['issue_number']}" / f"run-{run['attempt']}"
+        run_dir = Path(run_dir_raw) if run_dir_raw else run_directory(self.config.data_dir, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         thread_id = self._thread_id_for_run(run_id, run, run_dir)
         if not thread_id:
@@ -161,6 +169,11 @@ class ContinuationRunner:
             if require_pr_url and not pr_url:
                 message = f"{action} returned done without pr_url"
                 self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
+                self.store.add_event(run_id, "warning", action, message, payload)
+                return ContinuationResult(False, message, run_id)
+            if require_pr_url and not self.github.pull_request_exists(str(run["repo_name"]), pr_url):
+                message = f"{action} returned non-existent pr_url: {pr_url}"
+                self.store.update_run(run_id, state="blocked", stage="blocked", pr_url="", last_error=message)
                 self.store.add_event(run_id, "warning", action, message, payload)
                 return ContinuationResult(False, message, run_id)
             self.store.update_run(run_id, state=success_state, stage=success_stage, pr_url=pr_url, last_error="")
@@ -309,8 +322,8 @@ Continue from the existing Codex thread context and perform the closeout workflo
 4. Sync the local base branch with origin.
 5. Remove the local worktree and prune stale worktree metadata when it is safe.
 6. Close or update the completed issue if GitHub did not do it automatically.
-7. Inspect only open issues with the configured blocked label {blocked_label}; these are the standby agent issues. Determine which of those blocked issues are now unblocked and ready for an agent. For each issue that can now be run, add the configured ready label {ready_label} and remove {blocked_label}. Do not add {ready_label} to unlabeled issues, issues without {blocked_label}, or discussions/features that are not explicitly labeled for agent work. Do not start those issues.
-8. Report exactly which PR, worktree, branch, issue, and follow-up issue labels were changed.
+7. Do not inspect or modify follow-up issue labels during closeout. Agent Desk manages dependency unlocking locally from its dependency graph.
+8. Report exactly which PR, worktree, branch, and completed issue were changed.
 
 Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.
 """
@@ -332,8 +345,8 @@ Continue from the existing Codex thread context and perform the closeout workflo
 4. Sync the local base branch with origin.
 5. Remove the local worktree and prune stale worktree metadata when it is safe.
 6. Close or update the completed issue if GitHub did not do it automatically.
-7. Inspect only open issues with the configured blocked label {blocked_label}; these are the standby agent issues. Determine which of those blocked issues are now unblocked and ready for an agent. For each issue that can now be run, add the configured ready label {ready_label} and remove {blocked_label}. Do not add {ready_label} to unlabeled issues, issues without {blocked_label}, or discussions/features that are not explicitly labeled for agent work. Do not start those issues.
-8. Report exactly which PR, worktree, branch, issue, and follow-up issue labels were changed.
+7. Do not inspect or modify follow-up issue labels during closeout. Agent Desk manages dependency unlocking locally from its dependency graph.
+8. Report exactly which PR, worktree, branch, and completed issue were changed.
 
 Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.
 """

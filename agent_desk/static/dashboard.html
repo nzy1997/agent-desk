@@ -115,8 +115,13 @@
     .issue-row:last-child { border-bottom: none; }
     .issue-row input { margin-top: 2px; }
     .issue-row.on-desk { opacity: 0.6; }
-    .issue-title { cursor: pointer; }
+    .issue-title { cursor: pointer; flex: 1; min-width: 0; }
     .issue-title:hover { text-decoration: underline; }
+    .issue-remove {
+      padding: 3px 7px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
     .issue-body {
       flex-basis: 100%;
       margin-top: 6px;
