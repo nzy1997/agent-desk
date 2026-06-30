@@ -13,7 +13,6 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from .config import add_project_to_config, add_remote_repo_to_config, load_config
-from .continuation import ContinuationRunner
 from .scheduler import Scheduler
 from .store import Store
 from .worker import extract_thread_id, format_resume_command
@@ -304,10 +303,7 @@ def make_handler(
                 if not feedback.strip():
                     self.send_error(HTTPStatus.BAD_REQUEST, "feedback is required")
                     return
-                self._start_continuation("request_changes", run_id, feedback)
-                self._send_json(
-                    {"ok": True, "message": "Request changes started", "run_id": run_id}
-                )
+                self._send_json(scheduler.request_changes(run_id, feedback).__dict__)
                 return
             if path.startswith("/api/run/") and path.endswith("/approve-finish"):
                 run_id = int(path.split("/")[3])
@@ -421,13 +417,6 @@ def make_handler(
             body = self.rfile.read(length).decode("utf-8")
             value = json.loads(body)
             return value if isinstance(value, dict) else {}
-
-        def _start_continuation(
-            self, method_name: str, run_id: int, *args: Any
-        ) -> None:
-            runner = ContinuationRunner(scheduler.config, store)
-            method = getattr(runner, method_name)
-            threading.Thread(target=method, args=(run_id, *args), daemon=True).start()
 
         def _send_json(self, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, indent=2).encode("utf-8")

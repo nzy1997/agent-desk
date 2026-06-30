@@ -83,6 +83,15 @@ class NoopScheduler(Scheduler):
         target(**kwargs)
 
 
+class RecordingDispatchScheduler(Scheduler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dispatched = []
+
+    def _start_daemon_thread(self, target, kwargs):
+        self.dispatched.append((target.__name__, kwargs))
+
+
 class FailingSpawnScheduler(Scheduler):
     def _spawn_detached_job(self, run_id: int, kind: str) -> None:
         raise RuntimeError(f"spawn failed for {kind}")
@@ -101,6 +110,9 @@ class RecordingDependencyExtractor:
 class FakeContinuationRunner:
     def __init__(self):
         self.calls = []
+
+    def request_changes(self, run_id, feedback):
+        self.calls.append(("request_changes", run_id, feedback))
 
     def approve_finish(self, run_id):
         self.calls.append(("approve_finish", run_id))
@@ -491,6 +503,33 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue(result.started)
             self.assertEqual(github.added_labels, [])
             self.assertEqual(github.removed_labels, [])
+
+    def test_request_changes_dispatches_detached_job_with_persisted_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = RecordingDispatchScheduler(config, store, github=FakeGitHub())
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+            store.update_run(run_id, state="pr_open", pr_url="https://example.test/pr/1")
+
+            result = scheduler.request_changes(run_id, "please tighten the tests")
+
+            run = store.get_run(run_id)
+            self.assertTrue(result.started)
+            self.assertEqual(run["state"], "running")
+            self.assertEqual(run["stage"], "request-changes queued")
+            self.assertEqual(run["request_changes_feedback"], "please tighten the tests")
+            self.assertEqual(scheduler.dispatched, [("_run_request_changes", {"run_id": run_id})])
 
     def test_worker_completion_does_not_touch_github_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1150,6 +1189,30 @@ class DetachedJobTests(unittest.TestCase):
 
             self.assertEqual(github.pr_status_calls, [("octo/one", "https://example.test/pr/8")])
             self.assertEqual(continuation.calls, [(run_id, pr_status, 2, 3)])
+
+    def test_run_job_request_changes_uses_stored_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            continuation = FakeContinuationRunner()
+            scheduler = Scheduler(
+                self._config(root),
+                store,
+                github=FakeGitHub(),
+                continuation_factory=lambda config, store: continuation,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="T",
+                issue_url="u8",
+                branch_name="agent/issue-8",
+            )
+            store.update_run(run_id, request_changes_feedback="please tighten the tests")
+
+            scheduler.run_job(run_id, "request-changes")
+
+            self.assertEqual(continuation.calls, [("request_changes", run_id, "please tighten the tests")])
 
     def test_run_job_closeout_kinds_call_continuation(self):
         for kind, expected in [

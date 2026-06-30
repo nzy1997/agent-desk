@@ -10,7 +10,7 @@ from pathlib import Path
 from agent_desk.config import AgentDeskConfig, RepoConfig
 from agent_desk.dashboard import HTML, build_state_payload, run_viewer_html, serve_dashboard
 from agent_desk.dependencies import DependencyGraph, IssueDependencies
-from agent_desk.scheduler import Scheduler
+from agent_desk.scheduler import RunNextResult, Scheduler
 from agent_desk.store import Store
 
 
@@ -39,6 +39,17 @@ class _NoDependencyExtractor:
             issues=[IssueDependencies(number=int(issue["number"]), depends_on=[]) for issue in issues],
             warnings=[],
         )
+
+
+class _RequestChangesScheduler:
+    paused = False
+
+    def __init__(self):
+        self.calls = []
+
+    def request_changes(self, run_id, feedback):
+        self.calls.append((run_id, feedback))
+        return RunNextResult(True, "Request changes started", run_id)
 
 
 class DashboardTests(unittest.TestCase):
@@ -383,6 +394,12 @@ class DashboardTests(unittest.TestCase):
     def test_dashboard_html_includes_restart_button(self):
         self.assertIn("Restart", HTML)
         self.assertIn("/api/actions/restart", HTML)
+        self.assertIn("restartWithGuard()", HTML)
+        self.assertIn("function restartHazards", HTML)
+        self.assertIn("confirm(", HTML)
+        self.assertIn("supervisor_pid", HTML)
+        self.assertIn("request-changes queued", HTML)
+        self.assertIn("issuesLoading", HTML)
 
     def test_restart_route_returns_ok_and_invokes_restart_callback(self):
         host = "127.0.0.1"
@@ -419,6 +436,41 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["action"], "restart")
             self.assertTrue(restarted.wait(timeout=5), "restart callback was not invoked")
+
+    def test_request_changes_route_dispatches_through_scheduler(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            scheduler = _RequestChangesScheduler()
+            bound: dict[str, int] = {}
+            ready = threading.Event()
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "scheduler": scheduler,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+            request = urllib.request.Request(
+                f"http://{host}:{bound['port']}/api/run/42/request-changes",
+                data=json.dumps({"feedback": "tighten the tests"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read())
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(payload["started"])
+            self.assertEqual(payload["run_id"], 42)
+            self.assertEqual(scheduler.calls, [(42, "tighten the tests")])
 
 
 class ServeDashboardPortTests(unittest.TestCase):

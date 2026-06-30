@@ -23,6 +23,7 @@ MAX_CI_FIX_ATTEMPTS = 3
 # Maps an internal dispatch target to the detached job kind run-job understands.
 JOB_KIND_BY_TARGET = {
     "_run_worker_for_issue": "issue",
+    "_run_request_changes": "request-changes",
     "_run_approve_finish": "approve-finish",
     "_run_auto_finish": "auto-finish",
     "_run_ci_fix": "ci-fix",
@@ -593,6 +594,27 @@ class Scheduler:
             self._start_daemon_thread(self._run_approve_finish, {"run_id": run_id})
             return RunNextResult(True, "Approve and finish started", run_id)
 
+    def request_changes(self, run_id: int, feedback: str) -> RunNextResult:
+        with self._lock:
+            if self._paused:
+                return RunNextResult(False, "Scheduler is paused", run_id)
+            run = self.store.get_run(run_id)
+            if run["state"] != "pr_open":
+                return RunNextResult(False, f"Run #{run_id} is not open for review feedback", run_id)
+            feedback = str(feedback or "").strip()
+            if not feedback:
+                return RunNextResult(False, "feedback is required", run_id)
+            self.store.update_run(
+                run_id,
+                state="running",
+                stage="request-changes queued",
+                request_changes_feedback=feedback,
+                last_error="",
+            )
+            self.store.add_event(run_id, "info", "request-changes", "Starting request changes", {})
+            self._start_daemon_thread(self._run_request_changes, {"run_id": run_id})
+            return RunNextResult(True, "Request changes started", run_id)
+
     def auto_start_ready_runs(self, workspace_path: str | Path | None = None) -> list[RunNextResult]:
         results: list[RunNextResult] = []
         with self._lock:
@@ -729,6 +751,11 @@ class Scheduler:
                 issue_body=str(run.get("issue_body") or ""),
                 issue_url=str(run["issue_url"]),
                 branch_name=str(run["branch_name"]),
+            )
+        elif kind == "request-changes":
+            self._run_request_changes(
+                run_id=run_id,
+                feedback=str(run.get("request_changes_feedback") or ""),
             )
         elif kind == "approve-finish":
             self._run_approve_finish(run_id=run_id)
@@ -979,6 +1006,21 @@ class Scheduler:
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "fix-ci", "Automatic CI fix failed", {"detail": str(exc)})
+
+    def _run_request_changes(self, *, run_id: int, feedback: str | None = None) -> None:
+        try:
+            if feedback is None:
+                run = self.store.get_run(run_id)
+                feedback = str(run.get("request_changes_feedback") or "")
+            if not str(feedback).strip():
+                message = "request-changes requires feedback"
+                self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
+                self.store.add_event(run_id, "error", "request-changes", message, {})
+                return
+            self.continuation_factory(self.config, self.store).request_changes(run_id, str(feedback))
+        except Exception as exc:
+            self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
+            self.store.add_event(run_id, "error", "request-changes", "Request changes failed", {"detail": str(exc)})
 
     def _run_approve_finish(self, *, run_id: int) -> None:
         try:

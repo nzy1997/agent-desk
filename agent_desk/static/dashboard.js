@@ -3,9 +3,44 @@ let settingsProjectPath = '';
 let currentRepoName = '';
 let pickerRepo = null;
 let issuesLoading = false;
+let latestState = null;
+async function fetchState() {
+  const res = await fetch('/api/state');
+  return await res.json();
+}
 async function action(path) {
   await fetch(path, { method: 'POST' });
   await refresh();
+}
+function restartHazards(state) {
+  const hazards = [];
+  if (issuesLoading) {
+    hazards.push('Issue sync or dependency analysis is in progress.');
+  }
+  (state.runs || []).forEach(run => {
+    if (run.state !== 'running') return;
+    const stage = String(run.stage || 'running');
+    const label = `#${run.issue_number} ${stage}`;
+    if (stage === 'claimed') {
+      hazards.push(`${label} is being claimed before its supervisor is recorded.`);
+    } else if (stage === 'request-changes queued') {
+      hazards.push(`${label} is queued before its supervisor is recorded.`);
+    } else if (!run.supervisor_pid) {
+      hazards.push(`${label} has no supervisor_pid yet.`);
+    }
+  });
+  return hazards;
+}
+async function restartWithGuard() {
+  const state = latestState || await fetchState();
+  const hazards = restartHazards(state);
+  if (hazards.length) {
+    const message = `Restart Agent Desk anyway?\n\n${hazards.map(item => `- ${item}`).join('\n')}\n\nCancel keeps the service running.`;
+    if (!confirm(message)) return;
+  }
+  await fetch('/api/actions/restart', { method: 'POST' });
+  const health = document.getElementById('health');
+  if (health) health.textContent = 'Restarting...';
 }
 async function postJson(path, body) {
   const res = await fetch(path, {
@@ -470,8 +505,8 @@ function renderRuns(state) {
   return path ? renderSelectedProject(state, path) : renderProjectIndex(state);
 }
 async function refresh() {
-  const res = await fetch('/api/state');
-  const state = await res.json();
+  const state = await fetchState();
+  latestState = state;
   const stats = state.stats || {};
   document.getElementById('health').textContent = `${state.scheduler.paused ? 'Paused' : 'Active'} · ${Object.values(stats).reduce((a,b) => a + b, 0)} runs tracked`;
   renderSettings(state);
