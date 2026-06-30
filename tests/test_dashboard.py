@@ -62,6 +62,33 @@ class _RequestChangesScheduler:
         return RunNextResult(True, "Request changes started", run_id)
 
 
+class _ShutdownScheduler:
+    paused = False
+
+    def __init__(self):
+        self.shutdown_called = False
+        self.resume_calls = []
+
+    def shutdown_preview(self):
+        return {
+            "shutdown_id": "2026-06-30T12-00-00Z",
+            "running_count": 1,
+            "runs": [{"run_id": 7, "issue_number": 5, "stage": "running codex"}],
+        }
+
+    def shutdown_all(self):
+        self.shutdown_called = True
+        return {
+            "shutdown_id": "2026-06-30T12-00-00Z",
+            "manifest_path": "/tmp/shutdown.json",
+            "signal_results": [],
+        }
+
+    def resume_interrupted(self, run_id):
+        self.resume_calls.append(run_id)
+        return RunNextResult(True, "Resume interrupted started", run_id)
+
+
 class _RestartScheduler:
     def __init__(self):
         self.stopped = False
@@ -210,6 +237,11 @@ class DashboardTests(unittest.TestCase):
             (run_dir / "prompt.md").write_text("prompt", encoding="utf-8")
             (run_dir / "stderr.log").write_text("stderr", encoding="utf-8")
             (run_dir / "error.log").write_text("error", encoding="utf-8")
+            (run_dir / "resume-interrupted.stdout.jsonl").write_text("{}", encoding="utf-8")
+            (run_dir / "shutdown-resume-2026-06-30T12-00-00Z.md").write_text(
+                "resume note",
+                encoding="utf-8",
+            )
             store = Store(root / "desk.sqlite")
             run_id = store.create_run(
                 repo_name="octo/example",
@@ -222,7 +254,16 @@ class DashboardTests(unittest.TestCase):
 
             payload = build_state_payload(store)
 
-        self.assertEqual(payload["runs"][0]["log_files"], ["prompt.md", "stderr.log", "error.log"])
+        self.assertEqual(
+            payload["runs"][0]["log_files"],
+            [
+                "prompt.md",
+                "stderr.log",
+                "error.log",
+                "resume-interrupted.stdout.jsonl",
+                "shutdown-resume-2026-06-30T12-00-00Z.md",
+            ],
+        )
 
     def test_dashboard_html_renders_log_links(self):
         self.assertIn("logLinks(run)", HTML)
@@ -371,6 +412,21 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("/api/run/${runId}/request-changes", HTML)
         self.assertIn("/api/run/${run.id}/approve-finish", HTML)
         self.assertIn("Approve & finish", HTML)
+
+    def test_dashboard_html_renders_shutdown_all_control(self):
+        self.assertIn("Shutdown all", HTML)
+        self.assertIn("shutdownAll()", HTML)
+        self.assertIn("/api/actions/shutdown-preview", HTML)
+        self.assertIn("/api/actions/shutdown-all", HTML)
+
+    def test_dashboard_html_renders_interrupted_resume_controls(self):
+        self.assertIn("resumeInterrupted(", HTML)
+        self.assertIn("/resume-interrupted", HTML)
+        self.assertIn("resume_available", HTML)
+
+    def test_dashboard_html_omits_global_run_next_button(self):
+        self.assertNotIn("Run next", HTML)
+        self.assertNotIn("/api/actions/run-next", HTML)
 
     def test_state_payload_includes_pr_ci_status_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -550,6 +606,48 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(threads[0].daemon)
         self.assertIn(b'"action": "restart"', sock.response.getvalue())
 
+    def test_shutdown_all_route_starts_non_daemon_worker(self):
+        threads = []
+
+        class RecordingThread:
+            def __init__(self, target, daemon=None):
+                self.target = target
+                self.daemon_arg = daemon
+                self.daemon = threading.current_thread().daemon if daemon is None else daemon
+
+            def start(self):
+                threads.append(self)
+                self.target()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            scheduler = _ShutdownScheduler()
+            shutdowns = []
+            handler = make_handler(
+                store,
+                scheduler,
+                None,
+                restart_callback=None,
+                shutdown_callback=lambda: shutdowns.append("called"),
+            )
+            request = (
+                b"POST /api/actions/shutdown-all HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Length: 0\r\n"
+                b"\r\n"
+            )
+
+            with mock.patch("agent_desk.dashboard.threading.Thread", RecordingThread):
+                sock = _HandlerSocket(request)
+                handler(sock, ("127.0.0.1", 12345), object())
+
+        self.assertTrue(scheduler.shutdown_called)
+        self.assertEqual(shutdowns, ["called"])
+        self.assertEqual(len(threads), 1)
+        self.assertIs(threads[0].daemon_arg, False)
+        self.assertFalse(threads[0].daemon)
+        self.assertIn(b'"shutdown_id": "2026-06-30T12-00-00Z"', sock.response.getvalue())
+
     def test_restart_route_returns_ok_and_invokes_restart_callback(self):
         host = "127.0.0.1"
         with tempfile.TemporaryDirectory() as tmp:
@@ -620,6 +718,72 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(payload["started"])
             self.assertEqual(payload["run_id"], 42)
             self.assertEqual(scheduler.calls, [(42, "tighten the tests")])
+
+    def test_shutdown_preview_route_returns_scheduler_preview(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            scheduler = _ShutdownScheduler()
+            bound: dict[str, int] = {}
+            ready = threading.Event()
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "scheduler": scheduler,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+            with urllib.request.urlopen(
+                f"http://{host}:{bound['port']}/api/actions/shutdown-preview",
+                timeout=5,
+            ) as response:
+                payload = json.loads(response.read())
+
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["shutdown_id"], "2026-06-30T12-00-00Z")
+            self.assertEqual(payload["running_count"], 1)
+
+    def test_resume_interrupted_route_dispatches_scheduler(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            scheduler = _ShutdownScheduler()
+            bound: dict[str, int] = {}
+            ready = threading.Event()
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "scheduler": scheduler,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+            request = urllib.request.Request(
+                f"http://{host}:{bound['port']}/api/run/7/resume-interrupted",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read())
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(payload["started"])
+            self.assertEqual(payload["run_id"], 7)
+            self.assertEqual(scheduler.resume_calls, [7])
 
 
 class ServeDashboardPortTests(unittest.TestCase):
