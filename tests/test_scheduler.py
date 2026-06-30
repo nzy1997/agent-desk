@@ -7,6 +7,7 @@ from agent_desk.continuation import ContinuationResult
 from agent_desk.dependencies import Dependency, DependencyGraph, IssueDependencies
 from agent_desk.github_client import PullRequestChecksStatus
 from agent_desk.scheduler import Scheduler
+from agent_desk.shutdown import ProcessInfo
 from agent_desk.store import Store
 from agent_desk.worker import CommandResult, FakeCommandRunner, Worker
 
@@ -90,6 +91,29 @@ class RecordingDispatchScheduler(Scheduler):
 
     def _start_daemon_thread(self, target, kwargs):
         self.dispatched.append((target.__name__, kwargs))
+
+
+class FakeShutdownController:
+    def __init__(self, infos):
+        self.infos = infos
+        self.terminated = []
+        self.killed = []
+        self.alive = {}
+
+    def process_info(self, pid):
+        return self.infos.get(pid)
+
+    def process_group(self, pgid):
+        return [info for info in self.infos.values() if info.pgid == pgid]
+
+    def terminate_group(self, pgid):
+        self.terminated.append(pgid)
+
+    def kill_group(self, pgid):
+        self.killed.append(pgid)
+
+    def pid_alive(self, pid):
+        return self.alive.get(pid, False)
 
 
 class FailingSpawnScheduler(Scheduler):
@@ -530,6 +554,117 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(run["stage"], "request-changes queued")
             self.assertEqual(run["request_changes_feedback"], "please tighten the tests")
             self.assertEqual(scheduler.dispatched, [("_run_request_changes", {"run_id": run_id})])
+
+    def test_shutdown_preview_lists_running_runs_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "data" / "runs" / "issue-1" / "run-1"
+            run_dir.mkdir(parents=True)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=FakeGitHub())
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+            store.update_run(
+                run_id,
+                state="running",
+                stage="running codex",
+                run_dir=str(run_dir),
+                worktree_path=str(root / "worktree"),
+                codex_thread_id="thread",
+                supervisor_pid=111,
+            )
+            controller = FakeShutdownController(
+                {
+                    111: ProcessInfo(
+                        pid=111,
+                        ppid=1,
+                        pgid=111,
+                        command=(
+                            "python -m agent_desk run-job --config config/repos.toml "
+                            f"--run-id {run_id} --kind issue"
+                        ),
+                    ),
+                    112: ProcessInfo(pid=112, ppid=111, pgid=111, command="codex exec"),
+                }
+            )
+
+            preview = scheduler.shutdown_preview(controller=controller)
+
+            self.assertEqual(preview["running_count"], 1)
+            self.assertEqual(preview["runs"][0]["run_id"], run_id)
+            self.assertTrue(preview["runs"][0]["killable"])
+            self.assertEqual(store.get_run(run_id)["state"], "running")
+
+    def test_shutdown_all_marks_running_runs_interrupted_and_records_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "data" / "runs" / "issue-1" / "run-1"
+            run_dir.mkdir(parents=True)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=FakeGitHub(),
+                config_path=root / "repos.toml",
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+            store.update_run(
+                run_id,
+                state="running",
+                stage="running codex",
+                run_dir=str(run_dir),
+                worktree_path=str(root / "worktree"),
+                codex_thread_id="thread",
+                supervisor_pid=111,
+            )
+            controller = FakeShutdownController(
+                {
+                    111: ProcessInfo(
+                        pid=111,
+                        ppid=1,
+                        pgid=111,
+                        command=(
+                            "python -m agent_desk run-job --config config/repos.toml "
+                            f"--run-id {run_id} --kind issue"
+                        ),
+                    )
+                }
+            )
+            controller.alive = {111: True}
+
+            result = scheduler.shutdown_all(controller=controller, dashboard_pid=999, grace_seconds=0)
+            run = store.get_run(run_id)
+
+            self.assertEqual(run["state"], "interrupted")
+            self.assertEqual(run["stage"], "interrupted by shutdown")
+            self.assertIn("Interrupted by user shutdown", run["last_error"])
+            self.assertTrue(
+                any(event["event_type"] == "shutdown-interrupted" for event in run["events"])
+            )
+            self.assertEqual(controller.terminated, [111])
+            self.assertEqual(controller.killed, [111])
+            self.assertTrue(Path(result["manifest_path"]).exists())
+            self.assertTrue((run_dir / f"shutdown-{result['shutdown_id']}.json").exists())
+            self.assertEqual(result["signal_results"][0]["result"], "killed")
 
     def test_worker_completion_does_not_touch_github_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1339,6 +1474,31 @@ class DetachedJobTests(unittest.TestCase):
             self.assertEqual(store.get_run(dead)["state"], "failed")
             self.assertIn("orphaned", store.get_run(dead)["last_error"])
             self.assertEqual(store.get_run(no_pid)["state"], "failed")
+
+    def test_reconcile_orphans_ignores_interrupted_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub())
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="a",
+                issue_url="u1",
+                branch_name="b1",
+            )
+            store.update_run(
+                run_id,
+                state="interrupted",
+                stage="interrupted by shutdown",
+                supervisor_pid=222,
+            )
+            scheduler._pid_alive = staticmethod(lambda pid: False)
+
+            failed = scheduler.reconcile_orphans()
+
+            self.assertEqual(failed, [])
+            self.assertEqual(store.get_run(run_id)["state"], "interrupted")
 
     def test_pid_alive_false_for_unused_pid(self):
         self.assertFalse(Scheduler._pid_alive(2_000_000_000))

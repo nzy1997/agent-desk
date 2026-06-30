@@ -14,6 +14,14 @@ from .continuation import ContinuationRunner
 from .dependencies import Dependency, DependencyGraph, parse_dependency_result, render_dependency_prompt
 from .github_client import GitHubClient
 from .github_client import PullRequestChecksStatus
+from .shutdown import (
+    LocalProcessController,
+    ProcessController,
+    build_run_shutdown_item,
+    shutdown_id,
+    stop_verified_process_groups,
+    write_shutdown_artifacts,
+)
 from .store import Store, utc_now
 from .worker import CommandRunner, Worker, parse_json_object, slugify
 
@@ -111,6 +119,71 @@ class Scheduler:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def shutdown_preview(self, controller: ProcessController | None = None) -> dict[str, Any]:
+        process_controller = controller or LocalProcessController()
+        runs = self.store.list_runs({"running"})
+        items = [build_run_shutdown_item(run, process_controller) for run in runs]
+        return {
+            "shutdown_id": shutdown_id(),
+            "running_count": len(items),
+            "runs": items,
+        }
+
+    def shutdown_all(
+        self,
+        controller: ProcessController | None = None,
+        *,
+        dashboard_pid: int | None = None,
+        grace_seconds: float = 3.0,
+    ) -> dict[str, Any]:
+        process_controller = controller or LocalProcessController()
+        runs = self.store.list_runs({"running"})
+        items = [build_run_shutdown_item(run, process_controller) for run in runs]
+        sid = shutdown_id()
+        manifest = write_shutdown_artifacts(
+            config=self.config,
+            shutdown_id=sid,
+            items=items,
+            dashboard_pid=dashboard_pid or os.getpid(),
+            config_path=self.config_path,
+            extra_fields={"status": "recorded"},
+        )
+        for run, item in zip(runs, items, strict=False):
+            run_id = int(run["id"])
+            fields = {
+                "state": "interrupted",
+                "stage": "interrupted by shutdown",
+                "last_error": "Interrupted by user shutdown; resume from dashboard",
+                "shutdown_id": sid,
+                "shutdown_manifest": item.get("shutdown_manifest", ""),
+                "shutdown_resume_note": item.get("shutdown_resume_note", ""),
+            }
+            if item.get("codex_thread_id"):
+                fields["codex_thread_id"] = item["codex_thread_id"]
+            self.store.update_run(run_id, **fields)
+            self.store.add_event(
+                run_id,
+                "warning",
+                "shutdown-interrupted",
+                "Run interrupted by dashboard shutdown",
+                {
+                    "shutdown_id": sid,
+                    "manifest_path": manifest["manifest_path"],
+                    "killable": item.get("killable", False),
+                },
+            )
+        signal_results = stop_verified_process_groups(
+            items, process_controller, grace_seconds=grace_seconds
+        )
+        return write_shutdown_artifacts(
+            config=self.config,
+            shutdown_id=sid,
+            items=items,
+            dashboard_pid=dashboard_pid or os.getpid(),
+            config_path=self.config_path,
+            extra_fields={"status": "signaled", "signal_results": signal_results},
+        )
 
     def settings_payload(self, workspace_path: str | Path | None = None) -> dict[str, bool | int] | None:
         with self._lock:
