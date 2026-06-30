@@ -380,6 +380,46 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("single-closeout-per-workspace", HTML)
         self.assertIn("saveSettings()", HTML)
 
+    def test_dashboard_html_includes_restart_button(self):
+        self.assertIn("Restart", HTML)
+        self.assertIn("/api/actions/restart", HTML)
+
+    def test_restart_route_returns_ok_and_invokes_restart_callback(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            restarted = threading.Event()
+            bound: dict[str, int] = {}
+            ready = threading.Event()
+
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                    "restart_callback": restarted.set,
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+            request = urllib.request.Request(
+                f"http://{host}:{bound['port']}/api/actions/restart",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read())
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "restart")
+            self.assertTrue(restarted.wait(timeout=5), "restart callback was not invoked")
+
 
 class ServeDashboardPortTests(unittest.TestCase):
     def test_serve_dashboard_auto_increments_when_port_busy(self):

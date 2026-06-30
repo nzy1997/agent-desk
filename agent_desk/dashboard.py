@@ -4,8 +4,11 @@ import errno
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
+import sys
 import threading
+import time
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
@@ -136,6 +139,7 @@ def make_handler(
     store: Store,
     scheduler: Scheduler | None = None,
     config_path: Path | None = None,
+    restart_callback: Callable[[], None] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -181,10 +185,15 @@ def make_handler(
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
+            path = urlparse(self.path).path
+            if path == "/api/actions/restart":
+                self._send_json({"ok": True, "action": "restart"})
+                if restart_callback is not None:
+                    threading.Thread(target=restart_callback, daemon=True).start()
+                return
             if not scheduler:
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "scheduler disabled")
                 return
-            path = urlparse(self.path).path
             if path == "/api/actions/run-next":
                 self._send_json(scheduler.run_next().__dict__)
                 return
@@ -520,6 +529,18 @@ def make_handler(
     return Handler
 
 
+def restart_process(scheduler: Scheduler | None, server: ThreadingHTTPServer) -> None:
+    if scheduler is not None:
+        scheduler.stop()
+    server.shutdown()
+    time.sleep(0.05)
+    try:
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    except Exception as exc:
+        print(f"agent-desk: restart failed: {exc}", file=sys.stderr, flush=True)
+        os._exit(1)
+
+
 def serve_dashboard(
     host: str,
     port: int,
@@ -528,6 +549,7 @@ def serve_dashboard(
     config_path: Path | None = None,
     port_attempts: int = 20,
     on_serving: Callable[[str, int], None] | None = None,
+    restart_callback: Callable[[], None] | None = None,
 ) -> None:
     """Serve the dashboard, auto-incrementing the port if it is already in use.
 
@@ -535,12 +557,11 @@ def serve_dashboard(
     candidates. ``on_serving`` is invoked with the host and the port that was
     actually bound, so callers can report the real URL.
     """
-    handler = make_handler(store, scheduler, config_path)
     server = None
     last_error: OSError | None = None
     for candidate in range(port, port + port_attempts):
         try:
-            server = ThreadingHTTPServer((host, candidate), handler)
+            server = ThreadingHTTPServer((host, candidate), BaseHTTPRequestHandler)
             break
         except OSError as error:
             if error.errno != errno.EADDRINUSE:
@@ -551,6 +572,11 @@ def serve_dashboard(
             errno.EADDRINUSE,
             f"no free port in range {port}..{port + port_attempts - 1} on {host}",
         ) from last_error
+    actual_restart_callback = restart_callback or (
+        lambda: restart_process(scheduler, server)
+    )
+    handler = make_handler(store, scheduler, config_path, actual_restart_callback)
+    server.RequestHandlerClass = handler
     if on_serving is not None:
         on_serving(host, server.server_address[1])
     try:
