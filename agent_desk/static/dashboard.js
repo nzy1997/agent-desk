@@ -162,26 +162,10 @@ function renderIssuePicker(repo, issues) {
     return;
   }
   const rows = issues.map(issue => {
-    const badge = issue.on_desk ? '<span class="issue-badge">on desk</span>' : '';
-    const attrs = issue.on_desk ? 'checked disabled' : '';
-    const blocked = blockedByText(issue.blocked_by || []);
-    const dependencyHtml = blocked
-      ? `<div class="issue-body" style="display:block">Blocked by ${esc(blocked)}</div>`
-      : '';
-    const body = String(issue.body || '').trim();
-    const bodyHtml = body
-      ? `<div class="issue-body" id="body-${issue.number}" style="display:none">${esc(body)}</div>`
-      : '';
-    const remove = issue.removable
-      ? `<button class="issue-remove" onclick="removeIssue(${issue.number})">Remove</button>`
-      : '';
+    const attrs = issue.on_desk ? 'disabled' : '';
     return `<div class="issue-row ${issue.on_desk ? 'on-desk' : ''}">
       <input type="checkbox" value="${issue.number}" ${attrs}>
-      <span class="issue-title" onclick="toggleBody(${issue.number})"><strong>#${issue.number}</strong> ${esc(issue.title)}</span>
-      ${badge}
-      ${remove}
-      ${dependencyHtml}
-      ${bodyHtml}
+      <a class="issue-title" href="${esc(issue.url || '')}" target="_blank" rel="noopener noreferrer"><strong>#${issue.number}</strong> ${esc(issue.title)}</a>
     </div>`;
   }).join('');
   picker.innerHTML = `<div class="issue-picker">
@@ -203,10 +187,6 @@ function blockedByText(items) {
     const state = item.state ? ` (${item.state})` : '';
     return `${repo ? repo + '#' : '#'}${number}${state}`;
   }).join(', ');
-}
-function toggleBody(number) {
-  const el = document.getElementById('body-' + number);
-  if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 async function addSelected(mode) {
   const repo = currentRepoName;

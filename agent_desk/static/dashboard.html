@@ -134,30 +134,8 @@
     .issue-row:last-child { border-bottom: none; }
     .issue-row input { margin-top: 2px; }
     .issue-row.on-desk { opacity: 0.6; }
-    .issue-title { cursor: pointer; flex: 1; min-width: 0; }
+    .issue-title { color: var(--accent); cursor: pointer; flex: 1; min-width: 0; text-decoration: none; }
     .issue-title:hover { text-decoration: underline; }
-    .issue-remove {
-      padding: 3px 7px;
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .issue-body {
-      flex-basis: 100%;
-      margin-top: 6px;
-      padding: 6px 8px;
-      border-radius: 6px;
-      background: var(--bg);
-      color: var(--muted);
-      font-size: 12px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-    }
-    .issue-badge {
-      margin-left: auto;
-      font-size: 12px;
-      color: var(--muted);
-      white-space: nowrap;
-    }
     .settings-panel {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -348,7 +326,6 @@
       <button onclick="action('/api/actions/pause')">Pause</button>
       <button onclick="action('/api/actions/resume')">Resume</button>
       <button onclick="restartWithGuard()">Restart</button>
-      <button class="primary" onclick="action('/api/actions/run-next')">Run next</button>
     </div>
   </header>
   <main>

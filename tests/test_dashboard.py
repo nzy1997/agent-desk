@@ -396,6 +396,10 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("selectProjectByPath(this)", HTML)
         self.assertIn("Back to folders", HTML)
 
+    def test_dashboard_html_omits_global_run_next_button(self):
+        self.assertNotIn("Run next", HTML)
+        self.assertNotIn("/api/actions/run-next", HTML)
+
     def test_dashboard_html_renders_issue_picker_control(self):
         self.assertIn('id="issue-tools"', HTML)
         self.assertIn("syncIssues()", HTML)
@@ -412,12 +416,20 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('aria-label="Add selected issues directly"', HTML)
         self.assertIn(">Add</button>", HTML)
         self.assertNotIn(">Add all directly</button>", HTML)
-        self.assertIn("toggleBody(", HTML)
+        self.assertIn('class="issue-title"', HTML)
+        self.assertIn('href="${esc(issue.url || \'\')}"', HTML)
+        self.assertIn('target="_blank"', HTML)
+        self.assertIn('rel="noopener noreferrer"', HTML)
+        self.assertNotIn("toggleBody(", HTML)
+        self.assertNotIn("issue-badge", HTML)
+        self.assertNotIn('style="display:block">Blocked by ${esc(blocked)}', HTML)
+        self.assertNotIn("id=\"body-${issue.number}\"", HTML)
+        self.assertNotIn("issue-remove", HTML)
+        self.assertNotIn("checked disabled", HTML)
         self.assertIn("/api/actions/include-issues", HTML)
         self.assertIn("removeIssue(", HTML)
         self.assertIn("/api/actions/remove-issue", HTML)
         self.assertIn("renderIssueTools(state)", HTML)
-        self.assertIn("on desk", HTML)
         # Picker follows the selected project, not a separate repo dropdown.
         self.assertNotIn('id="include-repo"', HTML)
 
