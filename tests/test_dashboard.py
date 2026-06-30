@@ -6,11 +6,19 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
-from agent_desk.dashboard import HTML, build_state_payload, restart_process, run_viewer_html, serve_dashboard
+from agent_desk.dashboard import (
+    HTML,
+    build_state_payload,
+    make_handler,
+    restart_process,
+    run_viewer_html,
+    serve_dashboard,
+)
 from agent_desk.dependencies import DependencyGraph, IssueDependencies
 from agent_desk.scheduler import RunNextResult, Scheduler
 from agent_desk.store import Store
@@ -68,6 +76,20 @@ class _RestartServer:
 
     def shutdown(self):
         self.shutdown_called = True
+
+
+class _HandlerSocket:
+    def __init__(self, request: bytes):
+        self._request = BytesIO(request)
+        self.response = BytesIO()
+
+    def makefile(self, mode, *args, **kwargs):
+        if "r" in mode:
+            return self._request
+        return self.response
+
+    def sendall(self, data):
+        self.response.write(data)
 
 
 class DashboardTests(unittest.TestCase):
@@ -444,6 +466,37 @@ class DashboardTests(unittest.TestCase):
                 "config/repos.toml",
             ],
         )
+
+    def test_restart_route_starts_non_daemon_worker(self):
+        threads = []
+
+        class RecordingThread:
+            def __init__(self, target, daemon=None):
+                self.target = target
+                self.daemon_arg = daemon
+                self.daemon = threading.current_thread().daemon if daemon is None else daemon
+
+            def start(self):
+                threads.append(self)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            handler = make_handler(store, None, None, lambda: None)
+            request = (
+                b"POST /api/actions/restart HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Content-Length: 0\r\n"
+                b"\r\n"
+            )
+
+            with mock.patch("agent_desk.dashboard.threading.Thread", RecordingThread):
+                sock = _HandlerSocket(request)
+                handler(sock, ("127.0.0.1", 12345), object())
+
+        self.assertEqual(len(threads), 1)
+        self.assertIs(threads[0].daemon_arg, False)
+        self.assertFalse(threads[0].daemon)
+        self.assertIn(b'"action": "restart"', sock.response.getvalue())
 
     def test_restart_route_returns_ok_and_invokes_restart_callback(self):
         host = "127.0.0.1"

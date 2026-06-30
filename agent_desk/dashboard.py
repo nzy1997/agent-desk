@@ -188,7 +188,7 @@ def make_handler(
             if path == "/api/actions/restart":
                 self._send_json({"ok": True, "action": "restart"})
                 if restart_callback is not None:
-                    threading.Thread(target=restart_callback, daemon=True).start()
+                    threading.Thread(target=restart_callback, daemon=False).start()
                 return
             if not scheduler:
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "scheduler disabled")
