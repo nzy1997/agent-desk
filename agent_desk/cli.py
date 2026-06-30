@@ -16,6 +16,15 @@ from .scheduler import Scheduler
 from .store import Store
 
 
+def _require_config(parser: argparse.ArgumentParser, config_arg: str) -> Path:
+    config_path = Path(config_arg).expanduser()
+    if not config_path.is_absolute():
+        config_path = Path.cwd() / config_path
+    if not config_path.exists():
+        parser.error(f"{config_arg} not found; run 'agent-desk init-config' first")
+    return config_path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent-desk")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -55,18 +64,17 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "init-config":
-        path = Path(args.path)
+        path = Path(args.path).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
-            parser.error(f"{path} already exists")
+            print(f"{path} already exists")
+            return 0
         path.write_text(example_config(), encoding="utf-8")
         print(f"Wrote {path}")
         return 0
 
     if args.command == "add-repo":
-        config_path = Path(args.config)
-        if not config_path.exists():
-            parser.error(f"{config_path} not found; run 'agent-desk init-config' first")
+        config_path = _require_config(parser, args.config)
         existing = {repo.name for repo in load_config(config_path).repos}
         try:
             if args.clone:
@@ -83,8 +91,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Review base_branch and test_command in {config_path} before serving.")
         return 0
 
-    config = load_config(args.config)
-    config_path = Path(args.config).expanduser().resolve()
+    config_path = _require_config(parser, args.config)
+    config = load_config(config_path)
+    config_path = config_path.resolve()
     store = Store(config.data_dir / "agent-desk.sqlite")
     # serve and run-job dispatch work as detached processes that outlive the
     # server; the one-shot commands run their work inline.
@@ -113,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             port,
             store,
             active_scheduler,
-            Path(args.config).expanduser().resolve(),
+            config_path,
             on_serving=lambda h, p: print(f"Agent Desk dashboard: http://{h}:{p}", flush=True),
         )
         return 0

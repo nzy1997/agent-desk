@@ -24,7 +24,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
-serve: ## Launch the dashboard + scheduler (http://127.0.0.1:8765; auto-increments port if busy)
+serve: init ## Launch the dashboard + scheduler (http://127.0.0.1:8765; auto-increments port if busy)
 	$(PYTHON) -m agent_desk serve --config $(CONFIG) $(SERVE_FLAGS)
 
 init: ## Write an example config/repos.toml (does nothing if it exists)

@@ -27,6 +27,17 @@ def run_cli(argv):
     return code, out.getvalue()
 
 
+def run_cli_with_exit(argv):
+    out = io.StringIO()
+    err = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = main(argv)
+        except SystemExit as exc:
+            code = exc.code
+    return code, out.getvalue(), err.getvalue()
+
+
 class AddRepoCliTests(unittest.TestCase):
     def _write_config(self, root: Path) -> Path:
         config_path = root / "repos.toml"
@@ -123,6 +134,31 @@ class AddRepoCliTests(unittest.TestCase):
                     ["add-repo", "--config", str(Path(tmp) / "absent.toml"), "--path", str(project), "--name", "o/r"]
                 )
             self.assertEqual(ctx.exception.code, 2)
+
+
+class InitConfigCliTests(unittest.TestCase):
+    def test_init_config_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "repos.toml"
+
+            first_code, first_out = run_cli(["init-config", "--path", str(config_path)])
+            second_code, second_out = run_cli(["init-config", "--path", str(config_path)])
+
+            self.assertEqual(first_code, 0)
+            self.assertIn("Wrote", first_out)
+            self.assertEqual(second_code, 0)
+            self.assertIn("already exists", second_out)
+
+
+class ServeCliTests(unittest.TestCase):
+    def test_serve_missing_config_exits_with_setup_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _out, err = run_cli_with_exit(
+                ["serve", "--config", str(Path(tmp) / "absent.toml"), "--no-scheduler"]
+            )
+
+            self.assertEqual(code, 2)
+            self.assertIn("not found; run 'agent-desk init-config' first", err)
 
 
 class RunJobCliTests(unittest.TestCase):
