@@ -518,13 +518,18 @@ def make_handler(
     return Handler
 
 
+def default_restart_argv() -> list[str]:
+    return [sys.executable, "-m", "agent_desk", *sys.argv[1:]]
+
+
 def restart_process(scheduler: Scheduler | None, server: ThreadingHTTPServer) -> None:
     if scheduler is not None:
         scheduler.stop()
     server.shutdown()
     time.sleep(0.05)
     try:
-        os.execv(sys.executable, [sys.executable, *sys.argv])
+        restart_argv = default_restart_argv()
+        os.execv(restart_argv[0], restart_argv)
     except Exception as exc:
         print(f"agent-desk: restart failed: {exc}", file=sys.stderr, flush=True)
         os._exit(1)

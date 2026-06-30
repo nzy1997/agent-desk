@@ -1,14 +1,16 @@
 import json
 import socket
+import sys
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
-from agent_desk.dashboard import HTML, build_state_payload, run_viewer_html, serve_dashboard
+from agent_desk.dashboard import HTML, build_state_payload, restart_process, run_viewer_html, serve_dashboard
 from agent_desk.dependencies import DependencyGraph, IssueDependencies
 from agent_desk.scheduler import RunNextResult, Scheduler
 from agent_desk.store import Store
@@ -50,6 +52,22 @@ class _RequestChangesScheduler:
     def request_changes(self, run_id, feedback):
         self.calls.append((run_id, feedback))
         return RunNextResult(True, "Request changes started", run_id)
+
+
+class _RestartScheduler:
+    def __init__(self):
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+class _RestartServer:
+    def __init__(self):
+        self.shutdown_called = False
+
+    def shutdown(self):
+        self.shutdown_called = True
 
 
 class DashboardTests(unittest.TestCase):
@@ -400,6 +418,32 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("supervisor_pid", HTML)
         self.assertIn("request-changes queued", HTML)
         self.assertIn("issuesLoading", HTML)
+
+    def test_restart_process_reexecs_agent_desk_module(self):
+        scheduler = _RestartScheduler()
+        server = _RestartServer()
+        argv = ["/repo/agent_desk/__main__.py", "serve", "--config", "config/repos.toml"]
+
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch("agent_desk.dashboard.time.sleep"),
+            mock.patch("agent_desk.dashboard.os.execv") as execv,
+        ):
+            restart_process(scheduler, server)
+
+        self.assertTrue(scheduler.stopped)
+        self.assertTrue(server.shutdown_called)
+        execv.assert_called_once_with(
+            sys.executable,
+            [
+                sys.executable,
+                "-m",
+                "agent_desk",
+                "serve",
+                "--config",
+                "config/repos.toml",
+            ],
+        )
 
     def test_restart_route_returns_ok_and_invokes_restart_callback(self):
         host = "127.0.0.1"
