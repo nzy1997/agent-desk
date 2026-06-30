@@ -76,6 +76,25 @@ class ContinuationRunner:
             require_pr_url=True,
         )
 
+    def resume_interrupted(self, run_id: int) -> ContinuationResult:
+        run = self.store.get_run(run_id)
+        repo = self._repo_for_run(run)
+        prompt = render_resume_interrupted_prompt(run)
+        result = self._resume(
+            run_id,
+            "resume-interrupted",
+            prompt,
+            success_state="pr_open",
+            success_stage="resumed after shutdown",
+            sandbox=repo.closeout_sandbox,
+        )
+        refreshed = self.store.get_run(run_id)
+        if result.ok and not refreshed.get("pr_url"):
+            if repo.push_pr:
+                return self.open_pull_request(run_id)
+            self.store.update_run(run_id, state="done", stage="resumed after shutdown", last_error="")
+        return result
+
     def fix_ci(
         self,
         run_id: int,
@@ -176,6 +195,15 @@ class ContinuationRunner:
                 self.store.update_run(run_id, state="blocked", stage="blocked", pr_url="", last_error=message)
                 self.store.add_event(run_id, "warning", action, message, payload)
                 return ContinuationResult(False, message, run_id)
+            if success_state == "pr_open" and not pr_url:
+                self.store.update_run(
+                    run_id,
+                    state="running",
+                    stage=f"{action} done; opening pull request",
+                    last_error="",
+                )
+                self.store.add_event(run_id, "info", action, summary, payload)
+                return ContinuationResult(True, summary, run_id)
             self.store.update_run(run_id, state=success_state, stage=success_stage, pr_url=pr_url, last_error="")
             self.store.add_event(run_id, "info", action, summary, payload)
             return ContinuationResult(True, summary, run_id)
@@ -239,6 +267,27 @@ Human feedback:
 Continue from the existing Codex thread context. Address the feedback with the smallest appropriate change, run relevant verification, and push the updates to the existing PR branch. Do not merge the PR.
 
 Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.
+"""
+
+
+def render_resume_interrupted_prompt(run: dict[str, Any]) -> str:
+    return f"""You are resuming an Agent Desk worker run after a controlled Agent Desk shutdown.
+
+Original run:
+- run id: {run['id']}
+- repo: {run['repo_name']}
+- issue: #{run['issue_number']} {run.get('issue_title') or ''}
+- interrupted stage: {run.get('stage') or ''}
+- run directory: {run.get('run_dir') or ''}
+- worktree: {run.get('worktree_path') or ''}
+
+Before changing code, inspect the worktree and the run directory logs, including
+the original prompt and any shutdown-resume markdown file. Continue the original
+issue from the current worktree state. Do not restart from scratch unless the
+worktree state makes continuation impossible.
+
+Return a final response that satisfies schemas/worker-result.schema.json: include
+status, summary, tests, questions, risks, pr_url, and decision_log.
 """
 
 

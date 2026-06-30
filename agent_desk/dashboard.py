@@ -20,12 +20,13 @@ from .worker import extract_thread_id, format_resume_command
 
 RUN_DISPLAY_ORDER = {
     "running": 0,
-    "pr_open": 1,
-    "needs_review": 2,
-    "failed": 3,
-    "ready": 4,
-    "blocked": 5,
-    "done": 6,
+    "interrupted": 1,
+    "pr_open": 2,
+    "needs_review": 3,
+    "failed": 4,
+    "ready": 5,
+    "blocked": 6,
+    "done": 7,
 }
 
 
@@ -54,6 +55,7 @@ def build_state_payload(
         run["resume_command"] = format_resume_command(
             thread_id, str(run.get("worktree_path") or "")
         )
+        enrich_resume_fields(run)
         project = repo_paths.get(str(run.get("repo_name") or ""), {})
         run["project_name"] = project.get("name", run.get("repo_name") or "")
         run["project_path"] = project.get("path", "")
@@ -65,6 +67,22 @@ def build_state_payload(
         "settings": None,
     }
     return payload
+
+
+def resume_unavailable_reason(run: dict[str, Any]) -> str:
+    if str(run.get("state") or "") != "interrupted":
+        return ""
+    if not str(run.get("codex_thread_id") or ""):
+        return "missing Codex thread id"
+    if not str(run.get("worktree_path") or ""):
+        return "missing worktree path"
+    return ""
+
+
+def enrich_resume_fields(run: dict[str, Any]) -> None:
+    reason = resume_unavailable_reason(run)
+    run["resume_available"] = str(run.get("state") or "") == "interrupted" and not reason
+    run["resume_unavailable_reason"] = reason
 
 
 def run_display_key(run: dict[str, Any]) -> tuple[int, int]:
@@ -107,6 +125,10 @@ LOG_FILE_ORDER = [
     "fix-ci-3.stdout.jsonl",
     "fix-ci-3.stderr.log",
     "fix-ci-3-result.json",
+    "resume-interrupted-prompt.md",
+    "resume-interrupted.stdout.jsonl",
+    "resume-interrupted.stderr.log",
+    "resume-interrupted-result.json",
     "git-fetch.stderr.log",
     "git-fetch.stdout.log",
     "git-worktree.stderr.log",
@@ -122,7 +144,25 @@ LOG_FILE_ORDER = [
 def available_log_files(run_dir: Path) -> list[str]:
     if not run_dir or not run_dir.exists() or not run_dir.is_dir():
         return []
-    return [name for name in LOG_FILE_ORDER if (run_dir / name).exists()]
+    ordered = [name for name in LOG_FILE_ORDER if (run_dir / name).exists()]
+    dynamic = sorted(
+        path.name
+        for path in run_dir.iterdir()
+        if path.is_file() and is_dynamic_shutdown_log(path.name)
+    )
+    ordered.extend(name for name in dynamic if name not in ordered)
+    return ordered
+
+
+def is_dynamic_shutdown_log(name: str) -> bool:
+    return (
+        (name.startswith("shutdown-") and name.endswith(".json"))
+        or (name.startswith("shutdown-resume-") and name.endswith(".md"))
+    )
+
+
+def is_allowed_run_log(name: str) -> bool:
+    return name in set(LOG_FILE_ORDER) or is_dynamic_shutdown_log(name)
 
 
 def extract_thread_id_from_run_dir(run_dir: Path) -> str:
@@ -139,6 +179,7 @@ def make_handler(
     scheduler: Scheduler | None = None,
     config_path: Path | None = None,
     restart_callback: Callable[[], None] | None = None,
+    shutdown_callback: Callable[[], None] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -148,6 +189,12 @@ def make_handler(
                 return
             if path == "/api/state":
                 self._send_json(build_state_payload(store, scheduler))
+                return
+            if path == "/api/actions/shutdown-preview":
+                if not scheduler:
+                    self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "scheduler disabled")
+                    return
+                self._send_json(scheduler.shutdown_preview())
                 return
             if path == "/api/fs":
                 self._send_fs_listing()
@@ -195,6 +242,12 @@ def make_handler(
                 return
             if path == "/api/actions/run-next":
                 self._send_json(scheduler.run_next().__dict__)
+                return
+            if path == "/api/actions/shutdown-all":
+                result = scheduler.shutdown_all()
+                self._send_json(result)
+                if shutdown_callback is not None:
+                    threading.Thread(target=shutdown_callback, daemon=False).start()
                 return
             if path == "/api/actions/sync-issues":
                 payload = self._read_json()
@@ -304,6 +357,10 @@ def make_handler(
                     self.send_error(HTTPStatus.BAD_REQUEST, "feedback is required")
                     return
                 self._send_json(scheduler.request_changes(run_id, feedback).__dict__)
+                return
+            if path.startswith("/api/run/") and path.endswith("/resume-interrupted"):
+                run_id = int(path.split("/")[3])
+                self._send_json(scheduler.resume_interrupted(run_id).__dict__)
                 return
             if path.startswith("/api/run/") and path.endswith("/approve-finish"):
                 run_id = int(path.split("/")[3])
@@ -447,8 +504,7 @@ def make_handler(
             run = store.get_run(run_id)
             query = parse_qs(urlparse(self.path).query)
             requested = query.get("name", [""])[0]
-            allowed = set(LOG_FILE_ORDER)
-            if requested not in allowed:
+            if not is_allowed_run_log(requested):
                 self.send_error(HTTPStatus.BAD_REQUEST, "file not allowed")
                 return
             run_dir = Path(run["run_dir"])
@@ -470,7 +526,7 @@ def make_handler(
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             requested = parse_qs(urlparse(self.path).query).get("name", [""])[0]
-            if requested not in set(LOG_FILE_ORDER):
+            if requested not in set(LOG_FILE_ORDER) or not requested.endswith(".jsonl"):
                 self.send_error(HTTPStatus.BAD_REQUEST, "file not allowed")
                 return
             self._send_text(
@@ -535,6 +591,12 @@ def restart_process(scheduler: Scheduler | None, server: ThreadingHTTPServer) ->
         os._exit(1)
 
 
+def shutdown_process(scheduler: Scheduler | None, server: ThreadingHTTPServer) -> None:
+    if scheduler is not None:
+        scheduler.stop()
+    server.shutdown()
+
+
 def serve_dashboard(
     host: str,
     port: int,
@@ -544,6 +606,7 @@ def serve_dashboard(
     port_attempts: int = 20,
     on_serving: Callable[[str, int], None] | None = None,
     restart_callback: Callable[[], None] | None = None,
+    shutdown_callback: Callable[[], None] | None = None,
 ) -> None:
     """Serve the dashboard, auto-incrementing the port if it is already in use.
 
@@ -569,7 +632,16 @@ def serve_dashboard(
     actual_restart_callback = restart_callback or (
         lambda: restart_process(scheduler, server)
     )
-    handler = make_handler(store, scheduler, config_path, actual_restart_callback)
+    actual_shutdown_callback = shutdown_callback or (
+        lambda: shutdown_process(scheduler, server)
+    )
+    handler = make_handler(
+        store,
+        scheduler,
+        config_path,
+        actual_restart_callback,
+        actual_shutdown_callback,
+    )
     server.RequestHandlerClass = handler
     if on_serving is not None:
         on_serving(host, server.server_address[1])

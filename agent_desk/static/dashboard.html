@@ -172,7 +172,7 @@
     .muted { color: var(--muted); }
     .state-running { color: var(--accent); }
     .state-ready { color: var(--warn); }
-    .state-blocked, .state-failed { color: var(--bad); }
+    .state-blocked, .state-failed, .state-interrupted { color: var(--bad); }
     .state-done, .state-pr_open, .state-needs_review { color: var(--good); }
     .pr-status {
       display: inline-flex;
@@ -326,6 +326,7 @@
       <button onclick="action('/api/actions/pause')">Pause</button>
       <button onclick="action('/api/actions/resume')">Resume</button>
       <button onclick="restartWithGuard()">Restart</button>
+      <button onclick="shutdownAll()">Shutdown all</button>
     </div>
   </header>
   <main>

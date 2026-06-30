@@ -42,6 +42,31 @@ async function restartWithGuard() {
   const health = document.getElementById('health');
   if (health) health.textContent = 'Restarting...';
 }
+function shutdownRunLine(run) {
+  const pid = run.supervisor_pid ? `pid ${run.supervisor_pid}` : 'no pid';
+  const mode = run.killable ? 'will stop' : 'not verified';
+  return `#${run.issue_number} run ${run.run_id}: ${run.stage || run.state || 'running'} (${pid}, ${mode})`;
+}
+async function shutdownAll() {
+  const previewRes = await fetch('/api/actions/shutdown-preview');
+  if (!previewRes.ok) {
+    alert(await previewRes.text());
+    return;
+  }
+  const preview = await previewRes.json();
+  const runs = preview.runs || [];
+  const lines = runs.length ? runs.map(shutdownRunLine) : ['No running jobs are recorded.'];
+  const message = `Shutdown Agent Desk and stop ${runs.length} running job(s)?\n\n${lines.join('\n')}\n\nInterrupted runs will keep resume notes and a dashboard Resume action.`;
+  if (!confirm(message)) return;
+  const shutdownRes = await fetch('/api/actions/shutdown-all', { method: 'POST' });
+  if (!shutdownRes.ok) {
+    alert(await shutdownRes.text());
+    return;
+  }
+  const result = await shutdownRes.json();
+  const health = document.getElementById('health');
+  if (health) health.textContent = `Shutdown recorded: ${result.shutdown_id}`;
+}
 async function postJson(path, body) {
   const res = await fetch(path, {
     method: 'POST',
@@ -398,6 +423,9 @@ function requestChanges(runId) {
   const feedback = box ? box.value : '';
   return postJson(`/api/run/${runId}/request-changes`, { feedback });
 }
+function resumeInterrupted(runId) {
+  return postJson(`/api/run/${runId}/resume-interrupted`, {});
+}
 function prStatus(run) {
   if (!run.pr_url) return '';
   const status = run.pr_ci_status || 'unknown';
@@ -431,6 +459,14 @@ function runActions(run) {
         <button onclick="requestChanges(${run.id})">Request changes</button>
         <button class="primary" onclick="action('/api/run/${run.id}/approve-finish')">Approve & finish</button>
       </div>`;
+  }
+  if (run.state === 'interrupted') {
+    if (run.resume_available) {
+      return `<div class="run-actions">
+        <button class="primary" onclick="resumeInterrupted(${run.id})">Resume</button>
+      </div>`;
+    }
+    return `<div class="muted">Resume unavailable: ${esc(run.resume_unavailable_reason || 'missing resume metadata')}</div>`;
   }
   return '';
 }
@@ -496,7 +532,7 @@ async function refresh() {
   ).join('') || '<div class="muted">No runs yet</div>';
   document.getElementById('runs').innerHTML = renderRuns(state);
   document.getElementById('attention').innerHTML = state.runs
-    .filter(run => ['blocked','failed','needs_review'].includes(run.state))
+    .filter(run => ['blocked','failed','interrupted','needs_review'].includes(run.state))
     .slice(0, 8).map(runHtml).join('') || '<div class="muted">Nothing needs you</div>';
   document.getElementById('events').innerHTML = state.events.slice(0, 20).map(event =>
     `<div class="event ${esc(event.level)}">

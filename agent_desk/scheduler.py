@@ -14,6 +14,14 @@ from .continuation import ContinuationRunner
 from .dependencies import Dependency, DependencyGraph, parse_dependency_result, render_dependency_prompt
 from .github_client import GitHubClient
 from .github_client import PullRequestChecksStatus
+from .shutdown import (
+    LocalProcessController,
+    ProcessController,
+    build_run_shutdown_item,
+    shutdown_id,
+    stop_verified_process_groups,
+    write_shutdown_artifacts,
+)
 from .store import Store, utc_now
 from .worker import CommandRunner, Worker, parse_json_object, slugify
 
@@ -27,6 +35,7 @@ JOB_KIND_BY_TARGET = {
     "_run_approve_finish": "approve-finish",
     "_run_auto_finish": "auto-finish",
     "_run_ci_fix": "ci-fix",
+    "_run_resume_interrupted": "resume-interrupted",
 }
 CLOSEOUT_STAGES = {
     "approve-finish queued",
@@ -111,6 +120,71 @@ class Scheduler:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def shutdown_preview(self, controller: ProcessController | None = None) -> dict[str, Any]:
+        process_controller = controller or LocalProcessController()
+        runs = self.store.list_runs({"running"})
+        items = [build_run_shutdown_item(run, process_controller) for run in runs]
+        return {
+            "shutdown_id": shutdown_id(),
+            "running_count": len(items),
+            "runs": items,
+        }
+
+    def shutdown_all(
+        self,
+        controller: ProcessController | None = None,
+        *,
+        dashboard_pid: int | None = None,
+        grace_seconds: float = 3.0,
+    ) -> dict[str, Any]:
+        process_controller = controller or LocalProcessController()
+        runs = self.store.list_runs({"running"})
+        items = [build_run_shutdown_item(run, process_controller) for run in runs]
+        sid = shutdown_id()
+        manifest = write_shutdown_artifacts(
+            config=self.config,
+            shutdown_id=sid,
+            items=items,
+            dashboard_pid=dashboard_pid or os.getpid(),
+            config_path=self.config_path,
+            extra_fields={"status": "recorded"},
+        )
+        for run, item in zip(runs, items, strict=False):
+            run_id = int(run["id"])
+            fields = {
+                "state": "interrupted",
+                "stage": "interrupted by shutdown",
+                "last_error": "Interrupted by user shutdown; resume from dashboard",
+                "shutdown_id": sid,
+                "shutdown_manifest": item.get("shutdown_manifest", ""),
+                "shutdown_resume_note": item.get("shutdown_resume_note", ""),
+            }
+            if item.get("codex_thread_id"):
+                fields["codex_thread_id"] = item["codex_thread_id"]
+            self.store.update_run(run_id, **fields)
+            self.store.add_event(
+                run_id,
+                "warning",
+                "shutdown-interrupted",
+                "Run interrupted by dashboard shutdown",
+                {
+                    "shutdown_id": sid,
+                    "manifest_path": manifest["manifest_path"],
+                    "killable": item.get("killable", False),
+                },
+            )
+        signal_results = stop_verified_process_groups(
+            items, process_controller, grace_seconds=grace_seconds
+        )
+        return write_shutdown_artifacts(
+            config=self.config,
+            shutdown_id=sid,
+            items=items,
+            dashboard_pid=dashboard_pid or os.getpid(),
+            config_path=self.config_path,
+            extra_fields={"status": "signaled", "signal_results": signal_results},
+        )
 
     def settings_payload(self, workspace_path: str | Path | None = None) -> dict[str, bool | int] | None:
         with self._lock:
@@ -615,6 +689,35 @@ class Scheduler:
             self._start_daemon_thread(self._run_request_changes, {"run_id": run_id})
             return RunNextResult(True, "Request changes started", run_id)
 
+    def resume_interrupted(self, run_id: int) -> RunNextResult:
+        with self._lock:
+            if self._paused:
+                return RunNextResult(False, "Scheduler is paused", run_id)
+            run = self.store.get_run(run_id)
+            if run["state"] != "interrupted":
+                return RunNextResult(False, f"Run #{run_id} is not interrupted", run_id)
+            if not str(run.get("codex_thread_id") or ""):
+                return RunNextResult(False, "resume requires codex_thread_id", run_id)
+            if not str(run.get("worktree_path") or ""):
+                return RunNextResult(False, "resume requires worktree_path", run_id)
+            self.store.update_run(
+                run_id,
+                state="running",
+                stage="resume-interrupted queued",
+                last_error="",
+                ended_at="",
+                supervisor_pid="",
+            )
+            self.store.add_event(
+                run_id,
+                "info",
+                "resume-interrupted",
+                "Starting interrupted run resume",
+                {},
+            )
+            self._start_daemon_thread(self._run_resume_interrupted, {"run_id": run_id})
+            return RunNextResult(True, "Resume interrupted started", run_id)
+
     def auto_start_ready_runs(self, workspace_path: str | Path | None = None) -> list[RunNextResult]:
         results: list[RunNextResult] = []
         with self._lock:
@@ -765,6 +868,8 @@ class Scheduler:
             repo = self._repo_for_run(run)
             pr_status = self.github.pr_checks_status(repo.name, str(run["pr_url"]))
             self._run_ci_fix(run_id=run_id, pr_status=pr_status, attempt=int(run.get("ci_fix_attempts") or 1))
+        elif kind == "resume-interrupted":
+            self._run_resume_interrupted(run_id=run_id)
         else:
             raise ValueError(f"unknown job kind: {kind}")
 
@@ -1021,6 +1126,20 @@ class Scheduler:
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "request-changes", "Request changes failed", {"detail": str(exc)})
+
+    def _run_resume_interrupted(self, *, run_id: int) -> None:
+        try:
+            result = self.continuation_factory(self.config, self.store).resume_interrupted(run_id)
+            self._start_ci_fix_if_closeout_blocked_by_failed_checks(run_id, result)
+        except Exception as exc:
+            self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
+            self.store.add_event(
+                run_id,
+                "error",
+                "resume-interrupted",
+                "Interrupted run resume failed",
+                {"detail": str(exc)},
+            )
 
     def _run_approve_finish(self, *, run_id: int) -> None:
         try:
