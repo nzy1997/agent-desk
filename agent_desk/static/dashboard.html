@@ -101,8 +101,27 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 8px;
       padding: 8px 10px;
       border-bottom: 1px solid var(--line);
+    }
+    .issue-picker .issue-head strong {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .issue-actions {
+      display: flex;
+      flex: 0 0 auto;
+      gap: 4px;
+    }
+    .issue-action {
+      width: 84px;
+      padding: 5px 8px;
+      font-size: 12px;
+      line-height: 1.2;
+      white-space: nowrap;
     }
     .issue-list { max-height: 320px; overflow-y: auto; }
     .issue-row {

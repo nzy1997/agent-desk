@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_desk.config import add_project_to_config, load_config, parse_github_repo_name
+from agent_desk.config import (
+    add_project_to_config,
+    example_config,
+    load_config,
+    parse_github_repo_name,
+)
 
 
 class ConfigTests(unittest.TestCase):
@@ -102,16 +107,33 @@ closeout_sandbox = "danger-full-access"
 
             added = add_project_to_config(config_path, project, repo_name="octo/example")
             config = load_config(config_path)
+            appended_block = config_path.read_text(encoding="utf-8").split("[[repos]]")[-1]
 
         self.assertEqual(added.name, "octo/example")
         self.assertEqual(added.local_path, project.resolve())
         self.assertEqual(len(config.repos), 2)
+        self.assertNotIn("ready_label", appended_block)
+        self.assertNotIn("running_label", appended_block)
+        self.assertNotIn("pr_open_label", appended_block)
+        self.assertNotIn("blocked_label", appended_block)
+        self.assertNotIn("needs_review_label", appended_block)
+        self.assertNotIn("mutate_github", appended_block)
         self.assertEqual(config.repos[1].name, "octo/example")
         self.assertEqual(config.repos[1].local_path, project.resolve())
         self.assertEqual(config.repos[1].test_command, "python -m unittest")
-        self.assertTrue(config.repos[1].mutate_github)
+        self.assertFalse(config.repos[1].mutate_github)
         self.assertTrue(config.repos[1].push_pr)
         self.assertEqual(config.repos[1].closeout_sandbox, "danger-full-access")
+
+    def test_example_config_omits_issue_label_mutation_settings(self):
+        text = example_config()
+
+        self.assertNotIn("ready_label", text)
+        self.assertNotIn("running_label", text)
+        self.assertNotIn("pr_open_label", text)
+        self.assertNotIn("blocked_label", text)
+        self.assertNotIn("needs_review_label", text)
+        self.assertNotIn("mutate_github", text)
 
     def test_add_project_to_config_is_idempotent_for_existing_folder(self):
         with tempfile.TemporaryDirectory() as tmp:

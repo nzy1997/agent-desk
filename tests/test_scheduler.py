@@ -52,12 +52,16 @@ class RecordingGitHub(FakeGitHub):
     def __init__(self, add_label_error: Exception | None = None):
         super().__init__()
         self.added_labels = []
+        self.removed_labels = []
         self._add_label_error = add_label_error
 
     def add_label(self, repo, issue_number, label):
         if self._add_label_error is not None:
             raise self._add_label_error
         self.added_labels.append((repo, issue_number, label))
+
+    def remove_label(self, repo, issue_number, label):
+        self.removed_labels.append((repo, issue_number, label))
 
 
 class OpenIssueGitHub(RecordingGitHub):
@@ -153,6 +157,20 @@ class BlockingCloseoutContinuationRunner:
         self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
         self.store.add_event(run_id, "warning", "auto-finish", message, {"status": "blocked"})
         return ContinuationResult(False, message, run_id)
+
+
+class TerminalWorker:
+    def __init__(self, store, state: str):
+        self.store = store
+        self.state = state
+
+    def run_issue(self, *, run_id, **kwargs):
+        self.store.update_run(
+            run_id,
+            state=self.state,
+            stage=self.state,
+            pr_url="https://example.test/pr/1",
+        )
 
 
 class SchedulerTests(unittest.TestCase):
@@ -454,6 +472,64 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(run["state"], "running")
             self.assertEqual(run["stage"], "claimed")
             self.assertEqual(run["issue_body"], "one")
+
+    def test_start_run_does_not_touch_github_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                max_concurrent_runs=1,
+                repos=[RepoConfig(name="octo/one", local_path=root / "one", mutate_github=True)],
+            )
+            github = RecordingGitHub()
+            scheduler = NoopScheduler(config, store, github=github)
+            run_id = queue_ready(scheduler, "octo/one", [1])[0]
+
+            result = scheduler.start_run(run_id)
+
+            self.assertTrue(result.started)
+            self.assertEqual(github.added_labels, [])
+            self.assertEqual(github.removed_labels, [])
+
+    def test_worker_completion_does_not_touch_github_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                max_concurrent_runs=1,
+                repos=[RepoConfig(name="octo/one", local_path=root / "one", mutate_github=True)],
+            )
+            github = RecordingGitHub()
+            scheduler = Scheduler(
+                config,
+                store,
+                github=github,
+                worker=TerminalWorker(store, "pr_open"),
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+            store.update_run(run_id, state="running")
+
+            scheduler._run_worker_for_issue(
+                run_id=run_id,
+                repo=config.repos[0],
+                issue_number=1,
+                issue_title="First",
+                issue_body="one",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+
+            self.assertEqual(store.get_run(run_id)["state"], "pr_open")
+            self.assertEqual(github.added_labels, [])
+            self.assertEqual(github.removed_labels, [])
 
     def test_start_run_marks_failed_when_detached_supervisor_spawn_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

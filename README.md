@@ -67,7 +67,8 @@ ones you want and choose one of two add modes:
 
 Issues already on the desk show an `on desk` badge with a disabled checkbox.
 Use `Remove` to move a ready or dependency-waiting issue back to `available/`.
-Adding and removing are local queue operations; GitHub labels are only cosmetic.
+Adding and removing are local queue operations; Agent Desk does not mutate
+GitHub issue labels.
 
 ## Adding Repositories
 
@@ -137,12 +138,12 @@ Start low. Each active issue means one `codex exec` process plus whatever tests 
 The generated config sets:
 
 ```toml
-mutate_github = false
 push_pr = false
 closeout_sandbox = "workspace-write"
 ```
 
-With those defaults, Agent Desk reads GitHub issues and runs local workers, but it does not change labels or open PRs. Flip them only after the local loop behaves the way you want.
+With those defaults, Agent Desk reads GitHub issues and runs local workers, but
+it does not open PRs. Agent Desk does not mutate GitHub issue labels.
 
 `push_pr` controls the worker finishing choice:
 

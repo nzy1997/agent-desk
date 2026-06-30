@@ -218,7 +218,7 @@ class Scheduler:
         """Move a synced issue onto the desk (available -> ready) on disk.
 
         Desk state is folder-driven, so this is a pure local file move with no
-        GitHub call — the ``agent:ready`` label is no longer written.
+        GitHub label mutation.
         """
         return self.mark_issues_ready(repo_name, [issue_number], dependency_mode="direct")[0]
 
@@ -561,7 +561,7 @@ class Scheduler:
                 return self._start_ready_run(int(run["id"]))
             if blocked_by_limit:
                 return RunNextResult(False, "Max concurrent runs reached for workspace")
-            return RunNextResult(False, "No agent:ready issues found")
+            return RunNextResult(False, "No ready issues found")
 
     def start_run(self, run_id: int) -> RunNextResult:
         with self._lock:
@@ -667,9 +667,6 @@ class Scheduler:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=message, supervisor_pid="")
             self.store.add_event(run_id, "error", "spawn-failed", message, {"repo": repo.name})
             return RunNextResult(False, message, run_id)
-        if repo.mutate_github:
-            self.github.add_label(repo.name, issue_number, repo.running_label)
-            self.github.remove_label(repo.name, issue_number, repo.ready_label)
         return RunNextResult(True, f"Started issue #{issue_number}", run_id)
 
     def _start_daemon_thread(self, target, kwargs):
@@ -875,29 +872,15 @@ class Scheduler:
         issue_url: str,
         branch_name: str,
     ) -> None:
-        try:
-            self.worker.run_issue(
-                run_id=run_id,
-                repo=repo,
-                issue_number=issue_number,
-                issue_title=issue_title,
-                issue_body=issue_body,
-                issue_url=issue_url,
-                branch_name=branch_name,
-            )
-        finally:
-            if repo.mutate_github:
-                self._sync_terminal_labels(repo, issue_number, run_id)
-
-    def _sync_terminal_labels(self, repo: RepoConfig, issue_number: int, run_id: int) -> None:
-        run = self.store.get_run(run_id)
-        self.github.remove_label(repo.name, issue_number, repo.running_label)
-        if run["state"] == "pr_open":
-            self.github.add_label(repo.name, issue_number, repo.pr_open_label)
-        elif run["state"] == "done":
-            self.github.add_label(repo.name, issue_number, repo.needs_review_label)
-        elif run["state"] in {"blocked", "failed"}:
-            self.github.add_label(repo.name, issue_number, repo.blocked_label)
+        self.worker.run_issue(
+            run_id=run_id,
+            repo=repo,
+            issue_number=issue_number,
+            issue_title=issue_title,
+            issue_body=issue_body,
+            issue_url=issue_url,
+            branch_name=branch_name,
+        )
 
     def monitor_prs(self) -> list[RunNextResult]:
         results: list[RunNextResult] = []

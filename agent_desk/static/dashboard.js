@@ -152,8 +152,10 @@ function renderIssuePicker(repo, issues) {
   picker.innerHTML = `<div class="issue-picker">
     <div class="issue-head">
       <strong>${esc(repo)}</strong>
-      <button class="primary" onclick="addSelected('analyze')">Analyze dependencies</button>
-      <button onclick="addSelected('direct')">Add all directly</button>
+      <div class="issue-actions">
+        <button class="primary issue-action" title="Analyze dependencies" aria-label="Analyze dependencies for selected issues" onclick="addSelected('analyze')">Analyze</button>
+        <button class="issue-action" title="Add all directly" aria-label="Add selected issues directly" onclick="addSelected('direct')">Add</button>
+      </div>
     </div>
     <div class="issue-list">${rows}</div>
   </div>`;

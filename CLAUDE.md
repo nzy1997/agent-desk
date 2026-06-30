@@ -83,7 +83,7 @@ JSON file lives on disk. Layers (each its own module, wired together in `cli.py`
 - **`prompt.py`** renders the fixed worker prompt (Superpowers-to-PR protocol, Standing
   Answer Policy). Branches on `repo.push_pr` for the "create a PR" vs "keep branch" path.
 
-- **`github_client.py`** wraps `gh` for issue reads, label mutations, and PR check status.
+- **`github_client.py`** wraps `gh` for issue reads and PR check status.
 
 - **`dashboard.py`** is a stdlib `http.server` app. HTML/JS live in `agent_desk/static/`
   (`dashboard.*`, `viewer.*` for the auto-refreshing `.jsonl` log viewer) and are loaded
@@ -92,14 +92,13 @@ JSON file lives on disk. Layers (each its own module, wired together in `cli.py`
 
 ## Safety model (important)
 
-Two per-repo flags gate all outbound effects; both default to **false** in generated
-config:
+One per-repo flag gates PR publishing and defaults to **false** in generated config:
 
-- `mutate_github = false` → never writes GitHub labels (label changes are cosmetic;
-  desk state is folder-driven regardless).
 - `push_pr = false` → worker keeps the branch local; `true` → worker (or the manager as
   a fallback when Codex can't) pushes and opens a PR. A run only becomes `pr_open` once a
   PR URL exists.
+
+Agent Desk does not mutate GitHub issue labels; desk state is folder-driven.
 
 `closeout_sandbox` controls only the `Approve & finish` resume. Workers always start
 manually (`auto_start_ready = false`) unless a workspace opts in; `single_closeout_per_workspace`
