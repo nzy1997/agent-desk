@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Desk</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #17191f;
+      --muted: #667085;
+      --line: #d9dee7;
+      --accent: #126c8f;
+      --warn: #a15c00;
+      --bad: #b42318;
+      --good: #067647;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    h1 { font-size: 18px; margin: 0; }
+    button {
+      border: 1px solid var(--line);
+      background: #e4e9f0;
+      border-radius: 6px;
+      padding: 7px 10px;
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button:hover { background: #d7deea; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.primary:hover { background: #0f5c79; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(220px, 280px) minmax(360px, 1fr) minmax(260px, 340px);
+      min-height: calc(100vh - 57px);
+    }
+    section {
+      border-right: 1px solid var(--line);
+      padding: 16px;
+      overflow: auto;
+    }
+    section:last-child { border-right: 0; }
+    h2 {
+      font-size: 13px;
+      margin: 0 0 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .02em;
+    }
+    .metric-row, .run, .event, .project-row {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .metric-row { display: flex; justify-content: space-between; }
+    .project-row {
+      width: 100%;
+      text-align: left;
+      display: block;
+    }
+    .project-form, .settings-panel {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .project-form input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px 8px;
+      font: inherit;
+    }
+    .issue-picker {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      margin-bottom: 16px;
+    }
+    .issue-picker .issue-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .issue-list { max-height: 320px; overflow-y: auto; }
+    .issue-row {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    .issue-row:last-child { border-bottom: none; }
+    .issue-row input { margin-top: 2px; }
+    .issue-row.on-desk { opacity: 0.6; }
+    .issue-title { cursor: pointer; flex: 1; min-width: 0; }
+    .issue-title:hover { text-decoration: underline; }
+    .issue-remove {
+      padding: 3px 7px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .issue-body {
+      flex-basis: 100%;
+      margin-top: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--muted);
+      font-size: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .issue-badge {
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .settings-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px;
+    }
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 30px;
+    }
+    .setting-row input[type="number"] {
+      width: 72px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 6px;
+      font: inherit;
+    }
+    .setting-row input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 auto;
+    }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .section-head h2 { margin: 0; }
+    .muted { color: var(--muted); }
+    .state-running { color: var(--accent); }
+    .state-ready { color: var(--warn); }
+    .state-blocked, .state-failed { color: var(--bad); }
+    .state-done, .state-pr_open, .state-needs_review { color: var(--good); }
+    .pr-status {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+      margin-top: 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 3px 6px;
+      font-size: 12px;
+      background: #fff;
+    }
+    .pr-status-pending { border-color: #f7c46c; color: var(--warn); }
+    .pr-status-success { border-color: #8fd0ad; color: var(--good); }
+    .pr-status-failure { border-color: #f4b7b0; color: var(--bad); }
+    .pr-status-unknown { color: var(--muted); }
+    .event.error { border-color: #f4b7b0; }
+    .event.warning { border-color: #f7c46c; }
+    .log-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .log-links a {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 3px 6px;
+      text-decoration: none;
+      color: var(--accent);
+      background: #fff;
+      font-size: 12px;
+    }
+    .resume-command {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: center;
+      margin-top: 8px;
+    }
+    .resume-command code {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 6px;
+      background: #f8fafc;
+      color: var(--ink);
+      overflow-wrap: anywhere;
+      font-size: 12px;
+    }
+    .resume-command button {
+      padding: 5px 8px;
+      font-size: 12px;
+    }
+    .run-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .feedback-box {
+      width: 100%;
+      min-height: 64px;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px;
+      font: inherit;
+      resize: vertical;
+    }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #101828;
+      color: #f8fafc;
+      padding: 12px;
+      border-radius: 6px;
+      max-height: 300px;
+      overflow: auto;
+    }
+    .project-form-buttons { display: flex; gap: 8px; }
+    .project-form-buttons button { flex: 1; }
+    .fs-browser {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      margin-bottom: 16px;
+      max-height: 260px;
+      overflow: auto;
+    }
+    .fs-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+      position: sticky;
+      top: 0;
+      background: var(--bg, #fff);
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--line);
+      z-index: 1;
+    }
+    .fs-up { padding: 2px 8px; }
+    .fs-crumbs { flex: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-width: 0; }
+    .fs-crumb {
+      background: none; border: 0; padding: 1px 4px; cursor: pointer;
+      color: var(--accent, #2563eb); border-radius: 4px; font-size: 13px;
+    }
+    .fs-crumb:hover { background: rgba(37,99,235,0.1); }
+    .fs-crumb.current { color: inherit; font-weight: 600; cursor: default; }
+    .fs-crumb.current:hover { background: none; }
+    .fs-sep { color: var(--muted, #94a3b8); padding: 0 1px; }
+    .fs-list { list-style: none; margin: 0; padding: 0; }
+    .fs-list li {
+      display: flex; align-items: center; gap: 8px;
+      padding: 1px 2px; border-radius: 5px;
+    }
+    .fs-list li:hover { background: rgba(148,163,184,0.12); }
+    .fs-list li.is-repo { background: rgba(22,163,74,0.07); }
+    .fs-list li.is-repo:hover { background: rgba(22,163,74,0.14); }
+    .fs-dir {
+      flex: 1; text-align: left; background: none; border: 0;
+      cursor: pointer; display: flex; align-items: center; gap: 8px;
+      padding: 5px 4px; overflow: hidden;
+    }
+    .fs-icon { flex: none; }
+    .fs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fs-select { flex: none; padding: 2px 10px; }
+    .git-badge {
+      font-size: 11px;
+      color: #16a34a;
+      border: 1px solid #16a34a;
+      border-radius: 4px;
+      padding: 0 4px;
+      flex: none;
+    }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+      section { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Agent Desk</h1>
+      <div id="health" class="muted">Loading</div>
+    </div>
+    <div>
+      <button onclick="action('/api/actions/pause')">Pause</button>
+      <button onclick="action('/api/actions/resume')">Resume</button>
+      <button class="primary" onclick="action('/api/actions/run-next')">Run next</button>
+    </div>
+  </header>
+  <main>
+    <section>
+      <h2>Queue</h2>
+      <div class="project-form">
+        <input id="clone-spec" placeholder="OWNER/REPO or GitHub URL to clone">
+        <button onclick="cloneProject()">Clone &amp; add</button>
+      </div>
+      <div class="project-form">
+        <button onclick="toggleBrowser()">Browse for local folder&hellip;</button>
+      </div>
+      <div id="fs-browser" class="fs-browser" style="display:none"></div>
+      <div class="settings-panel">
+        <div class="section-head">
+          <h2>Workspace Settings</h2>
+          <button id="settings-save" onclick="saveSettings()">Save</button>
+        </div>
+        <label class="setting-row" for="auto-start-ready">
+          <span>Auto-start ready</span>
+          <input id="auto-start-ready" type="checkbox" onchange="markSettingsDirty()">
+        </label>
+        <label class="setting-row" for="max-concurrent-runs">
+          <span>Max parallel</span>
+          <input id="max-concurrent-runs" type="number" min="1" step="1" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+        </label>
+        <label class="setting-row" for="requires-human-review">
+          <span>Require human review</span>
+          <input id="requires-human-review" type="checkbox" onchange="markSettingsDirty()">
+        </label>
+        <label class="setting-row" for="single-closeout-per-workspace">
+          <span>One closeout per workspace</span>
+          <input id="single-closeout-per-workspace" type="checkbox" onchange="markSettingsDirty()">
+        </label>
+        <div id="settings-status" class="muted">Defaults loaded</div>
+      </div>
+      <div id="stats"></div>
+    </section>
+    <section>
+      <div class="section-head">
+        <h2 id="runs-title">Tasks</h2>
+        <button id="project-back" onclick="backToProjects()" style="display:none">Back to folders</button>
+      </div>
+      <div id="runs"></div>
+    </section>
+    <section>
+      <h2>Add Issues</h2>
+      <div id="issue-tools" class="project-form"></div>
+      <div id="issue-picker"></div>
+      <h2>Needs Attention</h2>
+      <div id="attention"></div>
+      <h2>Recent Events</h2>
+      <div id="events"></div>
+    </section>
+  </main>
+  <script src="dashboard.js"></script>
+</body>
+</html>

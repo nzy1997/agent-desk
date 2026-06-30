@@ -6,6 +6,54 @@ from agent_desk.github_client import GitHubClient, PullRequestChecksStatus
 
 
 class GitHubClientTests(unittest.TestCase):
+    def test_list_open_issues_requests_bodies_without_label_filter(self):
+        payload = '[{"number":1,"title":"One","body":"b1","url":"u1","labels":[]}]'
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(["gh", "issue", "list"], 0, payload, "")
+            issues = GitHubClient().list_open_issues("octo/example")
+        args = run.call_args.args[0]
+        self.assertNotIn("--label", args)
+        self.assertIn("number,title,body,url,labels", args)
+        self.assertEqual([issue["number"] for issue in issues], [1])
+
+    def test_pull_request_exists_uses_pr_view_for_reported_url(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["gh", "pr", "view"],
+                0,
+                '{"url":"https://github.com/octo/example/pull/9"}',
+                "",
+            )
+
+            exists = GitHubClient().pull_request_exists(
+                "octo/example",
+                "https://github.com/octo/example/pull/9",
+            )
+
+        self.assertTrue(exists)
+        self.assertEqual(
+            run.call_args.args[0],
+            ["gh", "pr", "view", "9", "--repo", "octo/example", "--json", "url"],
+        )
+
+    def test_pull_request_exists_rejects_missing_or_unresolvable_pr(self):
+        self.assertFalse(GitHubClient().pull_request_exists("octo/example", ""))
+
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                ["gh", "pr", "view"],
+                1,
+                "",
+                "GraphQL: Could not resolve to a PullRequest with the number of 128.",
+            )
+
+            exists = GitHubClient().pull_request_exists(
+                "octo/example",
+                "https://github.com/octo/example/pull/128",
+            )
+
+        self.assertFalse(exists)
+
     def test_pr_checks_status_parses_failed_checks_even_when_gh_exits_nonzero(self):
         with patch("agent_desk.github_client.subprocess.run") as run:
             run.side_effect = [

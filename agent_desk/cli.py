@@ -4,7 +4,12 @@ import argparse
 from pathlib import Path
 import threading
 
-from .config import example_config, load_config
+from .config import (
+    add_project_to_config,
+    add_remote_repo_to_config,
+    example_config,
+    load_config,
+)
 from .continuation import ContinuationRunner
 from .dashboard import serve_dashboard
 from .scheduler import Scheduler
@@ -17,6 +22,17 @@ def main(argv: list[str] | None = None) -> int:
 
     init = sub.add_parser("init-config", help="write an example repos.toml")
     init.add_argument("--path", default="config/repos.toml")
+
+    add_repo = sub.add_parser("add-repo", help="register a repository in the config")
+    add_repo.add_argument("--config", default="config/repos.toml")
+    add_repo_source = add_repo.add_mutually_exclusive_group(required=True)
+    add_repo_source.add_argument("--path", help="path to an existing local clone")
+    add_repo_source.add_argument(
+        "--clone", metavar="OWNER/REPO", help="clone OWNER/REPO (or a URL) into clone_root, then register"
+    )
+    add_repo.add_argument(
+        "--name", default="", help="OWNER/REPO for --path (inferred from the git origin remote if omitted)"
+    )
 
     serve = sub.add_parser("serve", help="start dashboard and scheduler")
     serve.add_argument("--config", default="config/repos.toml")
@@ -31,6 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     open_pr.add_argument("--config", default="config/repos.toml")
     open_pr.add_argument("--run-id", type=int, required=True)
 
+    # Internal: a detached supervisor process for one run, spawned by the server.
+    run_job = sub.add_parser("run-job", help="(internal) run one detached job for a run")
+    run_job.add_argument("--config", default="config/repos.toml")
+    run_job.add_argument("--run-id", type=int, required=True)
+    run_job.add_argument("--kind", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "init-config":
         path = Path(args.path)
@@ -41,9 +63,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote {path}")
         return 0
 
+    if args.command == "add-repo":
+        config_path = Path(args.config)
+        if not config_path.exists():
+            parser.error(f"{config_path} not found; run 'agent-desk init-config' first")
+        existing = {repo.name for repo in load_config(config_path).repos}
+        try:
+            if args.clone:
+                repo = add_remote_repo_to_config(config_path, args.clone)
+            else:
+                repo = add_project_to_config(config_path, args.path, repo_name=args.name)
+        except ValueError as error:
+            print(f"error: {error}")
+            return 1
+        if repo.name in existing:
+            print(f"{repo.name} is already configured ({repo.local_path})")
+        else:
+            print(f"Added {repo.name} -> {repo.local_path}")
+            print(f"Review base_branch and test_command in {config_path} before serving.")
+        return 0
+
     config = load_config(args.config)
+    config_path = Path(args.config).expanduser().resolve()
     store = Store(config.data_dir / "agent-desk.sqlite")
-    scheduler = Scheduler(config, store)
+    # serve and run-job dispatch work as detached processes that outlive the
+    # server; the one-shot commands run their work inline.
+    detach_jobs = args.command in {"serve", "run-job"}
+    scheduler = Scheduler(config, store, config_path=config_path, detach_jobs=detach_jobs)
     if args.command == "run-next":
         result = scheduler.run_next()
         print(result.message)
@@ -52,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
         result = ContinuationRunner(config, store).open_pull_request(args.run_id)
         print(result.message)
         return 0 if result.ok else 1
+    if args.command == "run-job":
+        scheduler.run_job(args.run_id, args.kind)
+        return 0
     if args.command == "serve":
         host = args.host or config.dashboard_host
         port = args.port or config.dashboard_port
@@ -59,8 +108,14 @@ def main(argv: list[str] | None = None) -> int:
         if active_scheduler:
             thread = threading.Thread(target=active_scheduler.serve_forever, daemon=True)
             thread.start()
-        print(f"Agent Desk dashboard: http://{host}:{port}")
-        serve_dashboard(host, port, store, active_scheduler, Path(args.config).expanduser().resolve())
+        serve_dashboard(
+            host,
+            port,
+            store,
+            active_scheduler,
+            Path(args.config).expanduser().resolve(),
+            on_serving=lambda h, p: print(f"Agent Desk dashboard: http://{h}:{p}", flush=True),
+        )
         return 0
     parser.error("unreachable")
     return 2

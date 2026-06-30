@@ -4,9 +4,11 @@ from pathlib import Path
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
 from agent_desk.continuation import ContinuationResult
+from agent_desk.dependencies import Dependency, DependencyGraph, IssueDependencies
 from agent_desk.github_client import PullRequestChecksStatus
 from agent_desk.scheduler import Scheduler
 from agent_desk.store import Store
+from agent_desk.worker import CommandResult, FakeCommandRunner, Worker
 
 
 class FakeGitHub:
@@ -22,14 +24,51 @@ class FakeGitHub:
             ],
         }
 
-    def list_ready_issues(self, repo, label, limit=10):
-        return self.issues[repo][:limit]
+    def list_open_issues(self, repo, limit=200):
+        return [{**issue, "labels": []} for issue in self.issues.get(repo, [])][:limit]
+
+    def get_issue(self, repo, issue_number):
+        for issue in self.issues.get(repo, []):
+            if int(issue["number"]) == issue_number:
+                return issue
+        return {"number": issue_number, "title": f"Issue {issue_number}", "body": "", "url": ""}
 
     def add_label(self, repo, issue_number, label):
-        raise AssertionError("label mutation should be disabled in this test")
+        pass
 
     def remove_label(self, repo, issue_number, label):
-        raise AssertionError("label mutation should be disabled in this test")
+        pass
+
+
+def queue_ready(scheduler, repo_name, numbers):
+    """Test helper: sync a repo's issues to disk, then move the given ones onto the desk."""
+    scheduler.sync_repo_issues(repo_name)
+    return [scheduler.mark_issue_ready(repo_name, number).run_id for number in numbers]
+
+
+class RecordingGitHub(FakeGitHub):
+    """FakeGitHub that records label writes instead of rejecting them."""
+
+    def __init__(self, add_label_error: Exception | None = None):
+        super().__init__()
+        self.added_labels = []
+        self._add_label_error = add_label_error
+
+    def add_label(self, repo, issue_number, label):
+        if self._add_label_error is not None:
+            raise self._add_label_error
+        self.added_labels.append((repo, issue_number, label))
+
+
+class OpenIssueGitHub(RecordingGitHub):
+    """Serves open issues with labels for list_repo_issues tests."""
+
+    def __init__(self, open_issues):
+        super().__init__()
+        self._open_issues = open_issues
+
+    def list_open_issues(self, repo, limit=50):
+        return self._open_issues.get(repo, [])[:limit]
 
 
 class NoopScheduler(Scheduler):
@@ -38,6 +77,21 @@ class NoopScheduler(Scheduler):
 
     def _start_daemon_thread(self, target, kwargs):
         target(**kwargs)
+
+
+class FailingSpawnScheduler(Scheduler):
+    def _spawn_detached_job(self, run_id: int, kind: str) -> None:
+        raise RuntimeError(f"spawn failed for {kind}")
+
+
+class RecordingDependencyExtractor:
+    def __init__(self, graph: DependencyGraph):
+        self.graph = graph
+        self.calls = []
+
+    def __call__(self, repo_name, issues):
+        self.calls.append((repo_name, issues))
+        return self.graph
 
 
 class FakeContinuationRunner:
@@ -102,7 +156,7 @@ class BlockingCloseoutContinuationRunner:
 
 
 class SchedulerTests(unittest.TestCase):
-    def test_run_available_discovers_ready_runs_without_starting_workers(self):
+    def test_sync_then_add_queues_ready_runs_without_starting_workers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / "desk.sqlite")
@@ -116,14 +170,270 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
 
-            results = scheduler.run_available()
+            queue_ready(scheduler, "octo/one", [1, 2])
+            queue_ready(scheduler, "octo/two", [3, 4])
 
-            self.assertEqual(len(results), 4)
-            self.assertTrue(all(not result.started for result in results))
             self.assertEqual(store.dashboard_state()["stats"]["ready"], 4)
-            issues_by_run_order = [run["issue_number"] for run in reversed(store.list_runs())]
+            issues_by_run_order = sorted(run["issue_number"] for run in store.list_runs())
             self.assertEqual(issues_by_run_order, [1, 2, 3, 4])
-            self.assertEqual(scheduler.run_available(), [])
+            # Syncing again does not duplicate records.
+            scheduler.sync_repo_issues("octo/one")
+            self.assertEqual(store.dashboard_state()["stats"]["ready"], 4)
+
+    def test_list_repo_issues_flags_on_desk_issues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = OpenIssueGitHub(
+                {
+                    "octo/one": [
+                        {"number": 10, "title": "Fresh", "url": "u10", "body": "b10", "labels": []},
+                        {"number": 11, "title": "Added", "url": "u11", "body": "b11", "labels": []},
+                        {"number": 12, "title": "Running", "url": "u12", "body": "b12", "labels": []},
+                    ]
+                }
+            )
+            scheduler = NoopScheduler(config, store, github=github)
+            scheduler.sync_repo_issues("octo/one")
+            # Move two issues onto the desk; #10 stays available.
+            scheduler.mark_issue_ready("octo/one", 11)
+            scheduler.mark_issue_ready("octo/one", 12)
+
+            issues = scheduler.list_repo_issues("octo/one")
+
+            on_desk = {issue["number"]: issue["on_desk"] for issue in issues}
+            self.assertEqual(on_desk, {10: False, 11: True, 12: True})
+            self.assertEqual({i["number"]: i["body"] for i in issues}[10], "b10")
+
+    def test_list_repo_issues_rejects_unconfigured_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=OpenIssueGitHub({}))
+
+            with self.assertRaises(KeyError):
+                scheduler.list_repo_issues("octo/missing")
+
+    def test_mark_issue_ready_queues_run_without_touching_github_labels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = RecordingGitHub()
+            scheduler = NoopScheduler(config, store, github=github)
+            scheduler.sync_repo_issues("octo/one")
+
+            result = scheduler.mark_issue_ready("octo/one", 1)
+
+            self.assertTrue(result.started)
+            # Adding to the desk is a pure local file move; no label is written.
+            self.assertEqual(github.added_labels, [])
+            run = store.get_run(result.run_id)
+            self.assertEqual(run["issue_number"], 1)
+            self.assertEqual(run["state"], "ready")
+
+    def test_remove_issue_from_desk_returns_ready_issue_to_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=RecordingGitHub())
+            scheduler.sync_repo_issues("octo/one")
+            add_result = scheduler.mark_issue_ready("octo/one", 1)
+
+            result = scheduler.remove_issue_from_desk("octo/one", 1)
+
+            self.assertTrue(result.started)
+            self.assertEqual(result.run_id, add_result.run_id)
+            record = store.get_record("octo/one", 1)
+            self.assertEqual(record["state"], "available")
+            self.assertEqual(record["stage"], "")
+            self.assertEqual(record["branch_name"], "")
+            self.assertEqual(record["dependencies"], [])
+            self.assertEqual(record["blocked_by"], [])
+            self.assertEqual(store.list_runs(), [])
+            issues = {issue["number"]: issue for issue in scheduler.list_repo_issues("octo/one")}
+            self.assertFalse(issues[1]["on_desk"])
+
+    def test_remove_issue_from_desk_rejects_active_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=RecordingGitHub())
+            scheduler.sync_repo_issues("octo/one")
+            run_id = scheduler.mark_issue_ready("octo/one", 1).run_id
+            store.update_run(run_id, state="running", stage="running")
+
+            result = scheduler.remove_issue_from_desk("octo/one", 1)
+
+            self.assertFalse(result.started)
+            self.assertIn("cannot be removed", result.message)
+            self.assertEqual(store.get_record("octo/one", 1)["state"], "running")
+
+    def test_mark_issues_ready_direct_mode_queues_every_selected_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=RecordingGitHub())
+            scheduler.sync_repo_issues("octo/one")
+
+            results = scheduler.mark_issues_ready("octo/one", [1, 2], dependency_mode="direct")
+
+            self.assertEqual([result.run_id for result in results], [1, 2])
+            self.assertEqual({run["issue_number"]: run["state"] for run in store.list_runs()}, {1: "ready", 2: "ready"})
+
+    def test_mark_issues_ready_analyze_mode_blocks_dependent_issues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            graph = DependencyGraph(
+                repo="octo/one",
+                issues=[
+                    IssueDependencies(number=1, depends_on=[]),
+                    IssueDependencies(
+                        number=2,
+                        depends_on=[
+                            Dependency(
+                                repo="octo/one",
+                                number=1,
+                                evidence="Depends on #1",
+                                confidence="high",
+                            )
+                        ],
+                    ),
+                ],
+                warnings=[],
+            )
+            extractor = RecordingDependencyExtractor(graph)
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=RecordingGitHub(), dependency_extractor=extractor)
+            scheduler.sync_repo_issues("octo/one")
+
+            scheduler.mark_issues_ready("octo/one", [1, 2], dependency_mode="analyze")
+
+            self.assertEqual(extractor.calls[0][0], "octo/one")
+            self.assertEqual([issue["number"] for issue in extractor.calls[0][1]], [1, 2])
+            records = {record["issue_number"]: record for record in store.list_records("octo/one")}
+            self.assertEqual(records[1]["state"], "ready")
+            self.assertEqual(records[1]["dependency_state"], "ready")
+            self.assertEqual(records[2]["state"], "blocked")
+            self.assertEqual(records[2]["stage"], "waiting for dependencies")
+            self.assertEqual(records[2]["dependency_state"], "blocked")
+            self.assertEqual(records[2]["blocked_by"][0]["number"], 1)
+
+    def test_poll_once_unlocks_blocked_issue_after_dependency_done(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            graph = DependencyGraph(
+                repo="octo/one",
+                issues=[
+                    IssueDependencies(number=1, depends_on=[]),
+                    IssueDependencies(
+                        number=2,
+                        depends_on=[Dependency(repo="octo/one", number=1, evidence="Depends on #1", confidence="high")],
+                    ),
+                ],
+                warnings=[],
+            )
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=RecordingGitHub(),
+                dependency_extractor=RecordingDependencyExtractor(graph),
+            )
+            scheduler.sync_repo_issues("octo/one")
+            scheduler.mark_issues_ready("octo/one", [1, 2], dependency_mode="analyze")
+            first = store.get_record("octo/one", 1)
+            second = store.get_record("octo/one", 2)
+            store.update_run(first["id"], state="done", stage="done")
+
+            scheduler.poll_once()
+
+            unlocked = store.get_run(second["id"])
+            self.assertEqual(unlocked["state"], "ready")
+            self.assertEqual(unlocked["stage"], "waiting for human run")
+            self.assertEqual(unlocked["dependency_state"], "ready")
+            self.assertEqual(unlocked["blocked_by"], [])
+
+    def test_default_dependency_extractor_invokes_codex_with_fixed_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex"],
+                        0,
+                        '{"repo":"octo/one","issues":[{"number":2,"depends_on":[{"repo":"octo/one","number":1,"evidence":"Depends on #1","confidence":"high"}],"notes":""}],"warnings":[]}',
+                        "",
+                    )
+                ]
+            )
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            worker = Worker(config, store, runner)
+            scheduler = NoopScheduler(config, store, github=RecordingGitHub(), worker=worker)
+
+            graph = scheduler._extract_dependencies_with_codex(
+                "octo/one",
+                [{"number": 2, "title": "Second", "body": "Depends on #1", "url": "u2"}],
+            )
+
+            call = runner.calls[0]
+            self.assertIn("codex", call.argv)
+            self.assertIn("--output-last-message", call.argv)
+            self.assertIn("You are Agent Desk's dependency extractor.", call.stdin)
+            self.assertEqual(graph.issues[0].depends_on[0].number, 1)
+
+    def test_mark_issue_ready_rejects_unconfigured_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = RecordingGitHub()
+            scheduler = NoopScheduler(config, store, github=github)
+
+            result = scheduler.mark_issue_ready("octo/missing", 7)
+
+            self.assertFalse(result.started)
+            self.assertIn("not a configured repository", result.message)
+            self.assertEqual(github.added_labels, [])
+            self.assertEqual(store.list_runs(), [])
 
     def test_start_run_claims_ready_issue_after_human_click(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,7 +445,7 @@ class SchedulerTests(unittest.TestCase):
                 repos=[RepoConfig(name="octo/one", local_path=root / "one")],
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
-            run_id = scheduler.run_available()[0].run_id
+            run_id = queue_ready(scheduler, "octo/one", [1])[0]
 
             result = scheduler.start_run(run_id)
             run = store.get_run(run_id)
@@ -144,6 +454,36 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(run["state"], "running")
             self.assertEqual(run["stage"], "claimed")
             self.assertEqual(run["issue_body"], "one")
+
+    def test_start_run_marks_failed_when_detached_supervisor_spawn_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                max_concurrent_runs=1,
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = FailingSpawnScheduler(
+                config,
+                store,
+                github=FakeGitHub(),
+                config_path=root / "repos.toml",
+                detach_jobs=True,
+            )
+            run_id = queue_ready(scheduler, "octo/one", [1])[0]
+
+            result = scheduler.start_run(run_id)
+            run = store.get_run(run_id)
+
+            self.assertFalse(result.started)
+            self.assertIn("Failed to start supervisor", result.message)
+            self.assertIn("spawn failed for issue", result.message)
+            self.assertEqual(run["state"], "failed")
+            self.assertEqual(run["stage"], "failed")
+            self.assertIn("spawn failed for issue", run["last_error"])
+            self.assertFalse(run.get("supervisor_pid"))
+            self.assertTrue(any(event["event_type"] == "spawn-failed" for event in run["events"]))
 
     def test_runtime_settings_limit_concurrent_manual_starts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,7 +495,7 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
             scheduler.update_settings(workspace_path=root / "one", max_concurrent_runs=1)
-            run_ids = [result.run_id for result in scheduler.run_available()]
+            run_ids = queue_ready(scheduler, "octo/one", [1, 2])
 
             first = scheduler.start_run(run_ids[0])
             second = scheduler.start_run(run_ids[1])
@@ -196,6 +536,33 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(settings["max_concurrent_runs"], 1)
         self.assertTrue(settings["requires_human_review"])
 
+    def test_workspace_settings_reset_auto_start_to_false_on_scheduler_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[
+                        RepoConfig(
+                            name="octo/one",
+                            local_path=root / "one",
+                            auto_start_ready=True,
+                            max_concurrent_runs=4,
+                            requires_human_review=False,
+                        )
+                    ],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+
+            settings = scheduler.settings_payload(root / "one")
+
+        self.assertFalse(settings["auto_start_ready"])
+        self.assertEqual(settings["max_concurrent_runs"], 4)
+        self.assertFalse(settings["requires_human_review"])
+
     def test_poll_once_auto_starts_ready_runs_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -206,6 +573,7 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
             scheduler.update_settings(workspace_path=root / "one", auto_start_ready=True)
+            queue_ready(scheduler, "octo/one", [1, 2])
 
             scheduler.poll_once()
             stats = store.dashboard_state()["stats"]
@@ -224,7 +592,7 @@ class SchedulerTests(unittest.TestCase):
                 ],
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
-            run_ids = [result.run_id for result in scheduler.run_available()]
+            run_ids = queue_ready(scheduler, "octo/one", [1, 2]) + queue_ready(scheduler, "octo/two", [3])
 
             first = scheduler.start_run(run_ids[0])
             second_same_workspace = scheduler.start_run(run_ids[1])
@@ -254,7 +622,8 @@ class SchedulerTests(unittest.TestCase):
             )
             scheduler = NoopScheduler(config, store, github=FakeGitHub())
 
-            result = scheduler.run_next()
+            # Re-adding a failed issue to the desk creates a fresh run with a new branch.
+            result = scheduler.mark_issue_ready("octo/one", 1)
             run = store.get_run(result.run_id)
 
             self.assertTrue(result.started)
@@ -635,6 +1004,206 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(pr_run["pr_ci_status"], "failure")
         self.assertEqual(pr_run["stage"], "auto-fixing ci (1/3)")
         self.assertEqual(continuation.calls, [(pr_run_id, pr_status, 1, 3)])
+
+
+class RecordingWorker:
+    """Captures the kwargs run_job reconstructs for the issue job."""
+
+    def __init__(self):
+        self.calls = []
+
+    def run_issue(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+class DetachedJobTests(unittest.TestCase):
+    def _config(self, root: Path) -> AgentDeskConfig:
+        return AgentDeskConfig(
+            data_dir=root / "data",
+            repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+        )
+
+    def test_run_job_issue_reconstructs_worker_kwargs_from_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            worker = RecordingWorker()
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub(), worker=worker)
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=7,
+                issue_title="Title",
+                issue_url="https://example.test/7",
+                branch_name="agent/issue-7",
+                issue_body="body text",
+            )
+
+            scheduler.run_job(run_id, "issue")
+
+            self.assertEqual(len(worker.calls), 1)
+            call = worker.calls[0]
+            self.assertEqual(call["issue_number"], 7)
+            self.assertEqual(call["issue_title"], "Title")
+            self.assertEqual(call["issue_body"], "body text")
+            self.assertEqual(call["branch_name"], "agent/issue-7")
+            self.assertEqual(call["repo"].name, "octo/one")
+
+    def test_run_job_ci_fix_refetches_pr_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            pr_status = PullRequestChecksStatus(state="failure", summary="boom", checks=[], head_sha="abc")
+            github = FakePullRequestGitHub(pr_status)
+            continuation = FakeContinuationRunner()
+            scheduler = Scheduler(
+                self._config(root),
+                store,
+                github=github,
+                continuation_factory=lambda config, store: continuation,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="T",
+                issue_url="u8",
+                branch_name="agent/issue-8",
+            )
+            store.update_run(run_id, pr_url="https://example.test/pr/8", ci_fix_attempts=2)
+
+            scheduler.run_job(run_id, "ci-fix")
+
+            self.assertEqual(github.pr_status_calls, [("octo/one", "https://example.test/pr/8")])
+            self.assertEqual(continuation.calls, [(run_id, pr_status, 2, 3)])
+
+    def test_run_job_closeout_kinds_call_continuation(self):
+        for kind, expected in [
+            ("approve-finish", "approve_finish"),
+            ("auto-finish", "finish_after_ci_success"),
+        ]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                store = Store(root / "desk.sqlite")
+                continuation = FakeContinuationRunner()
+                scheduler = Scheduler(
+                    self._config(root),
+                    store,
+                    github=FakeGitHub(),
+                    continuation_factory=lambda config, store: continuation,
+                )
+                run_id = store.create_run(
+                    repo_name="octo/one",
+                    issue_number=20,
+                    issue_title="T",
+                    issue_url="u20",
+                    branch_name="b",
+                )
+                scheduler.run_job(run_id, kind)
+                self.assertEqual(continuation.calls, [(expected, run_id)])
+
+    def test_spawn_detached_job_requires_config_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub(), detach_jobs=True)
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=21,
+                issue_title="T",
+                issue_url="u21",
+                branch_name="b",
+            )
+            with self.assertRaises(RuntimeError):
+                scheduler._spawn_detached_job(run_id, "issue")
+
+    def test_run_job_rejects_unknown_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub())
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=9,
+                issue_title="T",
+                issue_url="u9",
+                branch_name="b",
+            )
+            with self.assertRaises(ValueError):
+                scheduler.run_job(run_id, "nope")
+
+    def test_dispatch_spawns_detached_job_and_records_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(
+                self._config(root),
+                store,
+                github=FakeGitHub(),
+                config_path=root / "repos.toml",
+                detach_jobs=True,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=5,
+                issue_title="T",
+                issue_url="u5",
+                branch_name="b",
+            )
+            spawned = {}
+
+            def fake_popen(argv, **kwargs):
+                spawned["argv"] = argv
+                spawned["kwargs"] = kwargs
+
+                class _Proc:
+                    pid = 4321
+
+                return _Proc()
+
+            import agent_desk.scheduler as scheduler_module
+
+            original = scheduler_module.subprocess.Popen
+            scheduler_module.subprocess.Popen = fake_popen
+            try:
+                scheduler._start_daemon_thread(scheduler._run_worker_for_issue, {"run_id": run_id})
+            finally:
+                scheduler_module.subprocess.Popen = original
+
+            self.assertIn("run-job", spawned["argv"])
+            self.assertIn("issue", spawned["argv"])
+            self.assertTrue(spawned["kwargs"]["start_new_session"])
+            self.assertEqual(store.get_run(run_id)["supervisor_pid"], 4321)
+            self.assertEqual(store.get_run(run_id)["run_dir"], str(scheduler.config.data_dir / "runs" / "issue-5" / "run-1"))
+
+    def test_reconcile_orphans_fails_dead_runs_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(self._config(root), store, github=FakeGitHub())
+            alive = store.create_run(
+                repo_name="octo/one", issue_number=1, issue_title="a", issue_url="u1", branch_name="b1"
+            )
+            dead = store.create_run(
+                repo_name="octo/one", issue_number=2, issue_title="b", issue_url="u2", branch_name="b2"
+            )
+            no_pid = store.create_run(
+                repo_name="octo/one", issue_number=3, issue_title="c", issue_url="u3", branch_name="b3"
+            )
+            store.update_run(alive, state="running", supervisor_pid=111)
+            store.update_run(dead, state="running", supervisor_pid=222)
+            store.update_run(no_pid, state="running")
+            scheduler._pid_alive = staticmethod(lambda pid: pid == 111)
+
+            failed = scheduler.reconcile_orphans()
+
+            self.assertEqual(set(failed), {dead, no_pid})
+            self.assertEqual(store.get_run(alive)["state"], "running")
+            self.assertEqual(store.get_run(dead)["state"], "failed")
+            self.assertIn("orphaned", store.get_run(dead)["last_error"])
+            self.assertEqual(store.get_run(no_pid)["state"], "failed")
+
+    def test_pid_alive_false_for_unused_pid(self):
+        self.assertFalse(Scheduler._pid_alive(2_000_000_000))
+        self.assertFalse(Scheduler._pid_alive(0))
 
 
 if __name__ == "__main__":

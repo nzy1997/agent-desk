@@ -37,6 +37,7 @@ class AgentDeskConfig:
     dashboard_port: int = 8765
     worker_timeout_seconds: int = 7200
     worker_idle_timeout_seconds: int = 600
+    clone_root: Path = field(default_factory=lambda: Path.home() / ".agent-desk" / "repos")
     repos: list[RepoConfig] = field(default_factory=list)
 
 
@@ -84,6 +85,7 @@ def load_config(path: str | Path) -> AgentDeskConfig:
         dashboard_port=int(desk_raw.get("dashboard_port", 8765)),
         worker_timeout_seconds=int(desk_raw.get("worker_timeout_seconds", 7200)),
         worker_idle_timeout_seconds=int(desk_raw.get("worker_idle_timeout_seconds", 600)),
+        clone_root=_resolve_path(root, desk_raw.get("clone_root", "~/.agent-desk/repos")),
         repos=repos,
     )
 
@@ -158,6 +160,48 @@ def add_project_to_config(config_path: str | Path, local_path: str | Path, repo_
     return repo
 
 
+def parse_repo_spec(spec: str) -> str:
+    """Normalize an ``OWNER/REPO`` shorthand or a GitHub URL to ``OWNER/REPO``."""
+    text = spec.strip().rstrip("/")
+    match = re.fullmatch(r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?", text)
+    if match:
+        return f"{match.group('owner')}/{match.group('repo')}"
+    return parse_github_repo_name(text)
+
+
+def clone_repo(clone_root: str | Path, spec: str, runner=subprocess.run) -> Path:
+    """Clone ``spec`` into ``clone_root/OWNER/REPO`` and return the target path.
+
+    If the target already exists it is reused (clone is skipped), so this is
+    idempotent. ``runner`` is injected to keep the call testable.
+    """
+    name = parse_repo_spec(spec)
+    if not name:
+        raise ValueError(f"could not parse repository: {spec}")
+    owner, repo = name.split("/", 1)
+    target = Path(clone_root).expanduser() / owner / repo
+    if target.exists():
+        if not target.is_dir():
+            raise ValueError(f"clone target exists and is not a directory: {target}")
+        return target.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    completed = runner(
+        ["gh", "repo", "clone", name, str(target)],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise ValueError(f"clone failed: {completed.stderr.strip() or 'unknown error'}")
+    return target.resolve()
+
+
+def add_remote_repo_to_config(config_path: str | Path, spec: str, runner=subprocess.run) -> RepoConfig:
+    """Clone ``spec`` into the configured ``clone_root`` and register it."""
+    config = load_config(config_path)
+    target = clone_repo(config.clone_root, spec, runner=runner)
+    return add_project_to_config(config_path, target, repo_name=parse_repo_spec(spec))
+
+
 def _toml_string(value: str | Path) -> str:
     return json.dumps(str(value))
 
@@ -198,6 +242,8 @@ dashboard_host = "127.0.0.1"
 dashboard_port = 8765
 worker_timeout_seconds = 7200
 worker_idle_timeout_seconds = 600
+# Where repos cloned from the dashboard are stored (clone_root/OWNER/REPO).
+clone_root = "~/.agent-desk/repos"
 
 [[repos]]
 name = "OWNER/REPO"

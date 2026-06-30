@@ -7,12 +7,15 @@ This MVP uses only the Python standard library plus local command-line tools:
 - `gh` for GitHub issues and pull requests
 - `git` for worktrees and branches
 - `codex exec` for non-interactive worker runs
-- SQLite for local state
+- JSON files on disk for local state: each issue/run is one file whose state is
+  the folder it lives in (`state/<owner>__<repo>/<state>/<id>.json`), so the
+  full pipeline is inspectable and greppable. See
+  `docs/superpowers/specs/2026-06-23-filesystem-run-store-design.md`.
 
 ## MVP Scope
 
-- Scan configured repositories for `agent:ready` issues.
-- Queue configured repositories' `agent:ready` issues without starting workers automatically.
+- Sync configured repositories' open issues into a local `available/` list.
+- Queue selected local issues without starting workers automatically.
 - Start workers only after a human clicks `Run`.
 - Support multiple configured repositories in one manual queue with workspace-specific run settings.
 - Create a Git worktree and branch for each run.
@@ -23,16 +26,20 @@ This MVP uses only the Python standard library plus local command-line tools:
 
 ## Quick Start
 
+Generate a local config from the committed template
+(`config/repos.example.toml`):
+
 ```bash
-python3 -m agent_desk init-config
+make init        # or: python3 -m agent_desk init-config
 ```
 
-Edit `config/repos.toml` so the target repository and local clone path are correct.
+`config/repos.toml` is machine-specific and git-ignored. Edit it so the target
+repository and local clone path are correct.
 
 Start the dashboard:
 
 ```bash
-python3 -m agent_desk serve --config config/repos.toml
+make serve       # or: python3 -m agent_desk serve --config config/repos.toml
 ```
 
 Run one issue manually:
@@ -41,9 +48,46 @@ Run one issue manually:
 python3 -m agent_desk run-next --config config/repos.toml
 ```
 
-The scheduler polls GitHub and queues ready issues as local `ready` runs. It
-does not start Codex workers by itself. Use the dashboard `Run` button, or
-`run-next`, to start one queued issue.
+The `ready/` folder on disk is the queue. The scheduler does not start Codex
+workers by itself; use the dashboard `Run` button, or `run-next`, to start one
+ready task.
+
+To put issues on the desk, select a project in the Tasks panel; the Add Issues
+panel follows that selection. Click `Sync issues` to pull the repository's open
+issues from GitHub onto local disk (the `available/` folder). The picker then
+lists issues from disk; click an issue title to expand its full body. Tick the
+ones you want and choose one of two add modes:
+
+- `Analyze dependencies`: asks Codex CLI to extract an explicit dependency graph
+  from the selected issue bodies. Issues whose dependencies are already done move
+  to `ready/`; issues still blocked stay local in `blocked/` until dependencies
+  finish.
+- `Add all directly`: bypasses dependency analysis and moves every selected issue
+  straight to `ready/`.
+
+Issues already on the desk show an `on desk` badge with a disabled checkbox.
+Use `Remove` to move a ready or dependency-waiting issue back to `available/`.
+Adding and removing are local queue operations; GitHub labels are only cosmetic.
+
+## Adding Repositories
+
+You can register a repository three ways:
+
+- Dashboard clone: enter `OWNER/REPO` or a GitHub URL and click `Clone & add`.
+  The repo is cloned with `gh repo clone` into `clone_root/OWNER/REPO` and
+  registered automatically.
+- Dashboard existing folder: click `Browse for local folder...` and pick a local
+  folder from the built-in directory browser. Git repos are marked.
+- CLI: `agent-desk add-repo --path /abs/path/to/clone` for an existing clone, or
+  `agent-desk add-repo --clone OWNER/REPO` to clone then register.
+
+Cloned repositories are stored under `clone_root` (default
+`~/.agent-desk/repos`), configurable in the `[agent_desk]` section:
+
+```toml
+[agent_desk]
+clone_root = "~/.agent-desk/repos"
+```
 
 ## Multiple Repositories And Concurrency
 
@@ -125,7 +169,7 @@ Failed runs expose links in the dashboard for files such as `error.log`, `stderr
 The files also live under the configured data directory:
 
 ```text
-.agent-desk/runs/issue-ISSUE_NUMBER/run-ATTEMPT/
+.agent-desk/runs/run-RUN_ID/
 ```
 
 ## Human Intervention
@@ -157,13 +201,11 @@ For a run in `pr_open`, the dashboard exposes two Codex-resume actions:
 - `Approve & finish`: sends a generic closeout prompt to the original Codex
   thread. Codex checks PR status, refuses to merge if checks are pending or
   failing, merges when safe, syncs local state, cleans up the worktree, closes
-  or updates the completed issue, and promotes newly unblocked `agent:blocked`
-  issues to `agent:ready`.
+  or updates the completed issue.
 
-Agent Desk records the continuation logs on the same run. It does not decide
-which follow-up issues are ready; that judgment stays with the resumed Codex
-thread. Unlabeled issues and issues without `agent:blocked` are ignored during
-closeout so ordinary discussion threads or non-agent work are not picked up.
+Agent Desk records the continuation logs on the same run. Closeout does not
+inspect or modify follow-up issue labels. Local dependency metadata determines
+when blocked desk issues unlock into `ready/`.
 
 The dashboard defaults to `One closeout per workspace`, so only one PR in a
 repository checkout can be in the merge/cleanup closeout flow at a time. A

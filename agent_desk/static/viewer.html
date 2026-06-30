@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__TITLE__</title>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: #0b0e14;
+      color: #c9d1d9;
+      font: 12.5px/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 8px 12px;
+      border-bottom: 1px solid #1d2230;
+      color: #9aa4b2;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      background: #0b0e14;
+      z-index: 1;
+    }
+    header .live { color: #56d364; }
+    header .live.stale { color: #7d8694; }
+    #view { flex: 1; overflow: auto; padding: 12px 14px 40px; }
+    /* terminal blocks: real newlines preserved, long lines wrap */
+    .blk { margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+    .blk:last-child { margin-bottom: 0; }
+    /* command: prompt line then its output */
+    .cmd .prompt { color: #d2a8ff; }
+    .cmd .prompt .sym { color: #56d364; margin-right: 6px; }
+    .cmd .out { color: #8b98a9; margin-top: 2px; padding-left: 14px; border-left: 2px solid #1d2230; }
+    .cmd .running { color: #e3b341; }
+    .cmd .fail { color: #f85149; }
+    /* assistant message */
+    .msg { color: #d7e3f4; border-left: 2px solid #2f4566; padding-left: 10px; }
+    .msg .who { color: #6cb6ff; }
+    .msg .meta { color: #6e7a8a; }
+    /* reasoning / thinking */
+    .think { color: #7d8694; font-style: italic; }
+    /* file changes */
+    .files .who { color: #d2a8ff; }
+    .files .add { color: #56d364; }
+    .files .del { color: #f85149; }
+    .files .mod { color: #e3b341; }
+    /* tool / agent calls */
+    .tool .who { color: #6cb6ff; }
+    .tool .arg { color: #8b98a9; }
+    /* system events */
+    .sys { color: #4d5666; }
+    /* unparsed raw line */
+    .raw { color: #8b98a9; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>__TITLE__</strong>
+    <span id="live" class="live">● live</span>
+    <span style="margin-left:auto;color:#5c6470">auto-refreshing</span>
+  </header>
+  <div id="view"></div>
+  <script src="viewer.js"></script>
+</body>
+</html>

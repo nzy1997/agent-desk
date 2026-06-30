@@ -1,7 +1,12 @@
 .agent-desk/
+# Machine-specific runtime config. Generate it with `make init`
+# (or copy config/repos.example.toml).
+config/repos.toml
 __pycache__/
 *.pyc
 .DS_Store
 .venv/
 dist/
 *.egg-info/
+.coverage
+htmlcov/

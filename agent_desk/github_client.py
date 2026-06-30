@@ -23,7 +23,7 @@ class PullRequestViewStatus:
 
 
 class GitHubClient:
-    def list_ready_issues(self, repo: str, label: str, limit: int = 10) -> list[dict[str, Any]]:
+    def list_open_issues(self, repo: str, limit: int = 200) -> list[dict[str, Any]]:
         completed = subprocess.run(
             [
                 "gh",
@@ -31,8 +31,6 @@ class GitHubClient:
                 "list",
                 "--repo",
                 repo,
-                "--label",
-                label,
                 "--state",
                 "open",
                 "--limit",
@@ -47,6 +45,26 @@ class GitHubClient:
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
         return json.loads(completed.stdout or "[]")
+
+    def get_issue(self, repo: str, issue_number: int) -> dict[str, Any]:
+        completed = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "view",
+                str(issue_number),
+                "--repo",
+                repo,
+                "--json",
+                "number,title,body,url",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or completed.stdout.strip())
+        return json.loads(completed.stdout or "{}")
 
     def add_label(self, repo: str, issue_number: int, label: str) -> None:
         owner, name = repo.split("/", 1)
@@ -132,6 +150,24 @@ class GitHubClient:
         checks = normalize_checks(raw_checks)
         state, summary = summarize_checks(checks)
         return PullRequestChecksStatus(state=state, summary=summary, head_sha=pr_view.head_sha, checks=checks)
+
+    def pull_request_exists(self, repo: str, pr_url: str) -> bool:
+        pr_number = parse_pr_number(pr_url)
+        if not pr_number:
+            return False
+        completed = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--repo", repo, "--json", "url"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if not completed.stdout.strip():
+            return False
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return False
+        return bool(payload.get("url"))
 
     def _pr_view_status(self, repo: str, pr_number: str) -> PullRequestViewStatus:
         completed = subprocess.run(
