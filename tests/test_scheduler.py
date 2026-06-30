@@ -694,6 +694,7 @@ class SchedulerTests(unittest.TestCase):
                 stage="interrupted by shutdown",
                 codex_thread_id="thread",
                 worktree_path=str(worktree),
+                supervisor_pid=222,
             )
             scheduler = SpawnRecordingScheduler(
                 AgentDeskConfig(
@@ -711,6 +712,8 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue(result.started)
             self.assertEqual(store.get_run(run_id)["state"], "running")
             self.assertEqual(store.get_run(run_id)["stage"], "resume-interrupted queued")
+            self.assertEqual(store.get_run(run_id)["ended_at"], "")
+            self.assertEqual(store.get_run(run_id)["supervisor_pid"], "")
             self.assertEqual(scheduler.spawned[-1]["kind"], "resume-interrupted")
 
     def test_worker_completion_does_not_touch_github_labels(self):

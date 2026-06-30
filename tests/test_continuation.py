@@ -88,6 +88,7 @@ class ContinuationTests(unittest.TestCase):
                 worktree_path=str(worktree),
                 codex_thread_id="thread",
             )
+            store.update_run(run_id, ended_at="old-ended-at")
             runner = FakeCommandRunner(
                 [
                     CommandResult(
@@ -113,6 +114,7 @@ class ContinuationTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(run["state"], "pr_open")
         self.assertEqual(run["pr_url"], "https://example.test/pr/1")
+        self.assertNotEqual(run["ended_at"], "old-ended-at")
         self.assertTrue(any("resume-interrupted" in arg for arg in runner.calls[0].argv))
 
     def test_request_changes_resumes_original_codex_thread_with_feedback(self):

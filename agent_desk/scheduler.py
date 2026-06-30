@@ -700,7 +700,14 @@ class Scheduler:
                 return RunNextResult(False, "resume requires codex_thread_id", run_id)
             if not str(run.get("worktree_path") or ""):
                 return RunNextResult(False, "resume requires worktree_path", run_id)
-            self.store.update_run(run_id, state="running", stage="resume-interrupted queued", last_error="")
+            self.store.update_run(
+                run_id,
+                state="running",
+                stage="resume-interrupted queued",
+                last_error="",
+                ended_at="",
+                supervisor_pid="",
+            )
             self.store.add_event(
                 run_id,
                 "info",
