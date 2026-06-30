@@ -57,6 +57,27 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(run["ci_fix_attempts"], 2)
         self.assertEqual(run["ci_fix_last_sha"], "abc123")
 
+    def test_interrupted_is_terminal_and_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=42,
+                issue_title="Fix queue",
+                issue_url="https://github.com/octo/example/issues/42",
+                branch_name="agent/issue-42-fix-queue",
+            )
+            store.update_run(run_id, state="running", stage="running codex")
+            store.update_run(run_id, state="interrupted", stage="interrupted by shutdown")
+
+            run = store.get_run(run_id)
+            state = store.dashboard_state()
+
+        self.assertEqual(run["state"], "interrupted")
+        self.assertEqual(run["stage"], "interrupted by shutdown")
+        self.assertTrue(run["ended_at"])
+        self.assertEqual(state["stats"]["interrupted"], 1)
+
 
     def test_state_is_traced_by_folder_moves(self):
         with tempfile.TemporaryDirectory() as tmp:

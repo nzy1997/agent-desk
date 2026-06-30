@@ -313,6 +313,55 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(run["codex_thread_id"], "019ed932-fe5d-7391-b856-98b2239a6380")
         self.assertIn("codex resume --include-non-interactive", run["resume_command"])
 
+    def test_state_payload_marks_interrupted_run_resume_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree_path = root / "worktree"
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Add dashboard",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-add-dashboard",
+            )
+            store.update_run(
+                run_id,
+                state="interrupted",
+                stage="interrupted by shutdown",
+                worktree_path=str(worktree_path),
+                codex_thread_id="019ed932-fe5d-7391-b856-98b2239a6380",
+            )
+
+            run = build_state_payload(store)["runs"][0]
+
+        self.assertTrue(run["resume_available"])
+        self.assertEqual(run["resume_unavailable_reason"], "")
+
+    def test_state_payload_marks_interrupted_run_resume_unavailable_without_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree_path = root / "worktree"
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Add dashboard",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-add-dashboard",
+            )
+            store.update_run(
+                run_id,
+                state="interrupted",
+                stage="interrupted by shutdown",
+                worktree_path=str(worktree_path),
+            )
+
+            run = build_state_payload(store)["runs"][0]
+
+        self.assertFalse(run["resume_available"])
+        self.assertEqual(run["resume_unavailable_reason"], "missing Codex thread id")
+
     def test_dashboard_html_renders_resume_command(self):
         self.assertIn("resumeCommand(run)", HTML)
         self.assertIn("navigator.clipboard.writeText(command)", HTML)
@@ -440,6 +489,9 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("supervisor_pid", HTML)
         self.assertIn("request-changes queued", HTML)
         self.assertIn("issuesLoading", HTML)
+
+    def test_dashboard_html_includes_interrupted_attention_state(self):
+        self.assertIn("['blocked','failed','interrupted','needs_review']", HTML)
 
     def test_restart_process_reexecs_agent_desk_module(self):
         scheduler = _RestartScheduler()

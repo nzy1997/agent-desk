@@ -15,10 +15,20 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 
 
 # Run states that mean "no further automated work" (used by find_open_run).
-TERMINAL_STATES = {"done", "failed", "blocked", "pr_open", "needs_review"}
+TERMINAL_STATES = {"done", "failed", "blocked", "pr_open", "needs_review", "interrupted"}
 
 # Valid run states (folders). "available" is a synced issue that is not yet a run.
-RUN_STATES = ("queued", "ready", "running", "pr_open", "needs_review", "blocked", "done", "failed")
+RUN_STATES = (
+    "queued",
+    "ready",
+    "running",
+    "pr_open",
+    "needs_review",
+    "blocked",
+    "interrupted",
+    "done",
+    "failed",
+)
 ALL_STATES = ("available",) + RUN_STATES
 
 # find_open_run looks for an active run, so it ignores synced-but-not-queued

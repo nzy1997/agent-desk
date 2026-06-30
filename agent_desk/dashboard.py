@@ -20,12 +20,13 @@ from .worker import extract_thread_id, format_resume_command
 
 RUN_DISPLAY_ORDER = {
     "running": 0,
-    "pr_open": 1,
-    "needs_review": 2,
-    "failed": 3,
-    "ready": 4,
-    "blocked": 5,
-    "done": 6,
+    "interrupted": 1,
+    "pr_open": 2,
+    "needs_review": 3,
+    "failed": 4,
+    "ready": 5,
+    "blocked": 6,
+    "done": 7,
 }
 
 
@@ -54,6 +55,7 @@ def build_state_payload(
         run["resume_command"] = format_resume_command(
             thread_id, str(run.get("worktree_path") or "")
         )
+        enrich_resume_fields(run)
         project = repo_paths.get(str(run.get("repo_name") or ""), {})
         run["project_name"] = project.get("name", run.get("repo_name") or "")
         run["project_path"] = project.get("path", "")
@@ -65,6 +67,22 @@ def build_state_payload(
         "settings": None,
     }
     return payload
+
+
+def resume_unavailable_reason(run: dict[str, Any]) -> str:
+    if str(run.get("state") or "") != "interrupted":
+        return ""
+    if not str(run.get("codex_thread_id") or ""):
+        return "missing Codex thread id"
+    if not str(run.get("worktree_path") or ""):
+        return "missing worktree path"
+    return ""
+
+
+def enrich_resume_fields(run: dict[str, Any]) -> None:
+    reason = resume_unavailable_reason(run)
+    run["resume_available"] = str(run.get("state") or "") == "interrupted" and not reason
+    run["resume_unavailable_reason"] = reason
 
 
 def run_display_key(run: dict[str, Any]) -> tuple[int, int]:

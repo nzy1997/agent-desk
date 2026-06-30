@@ -516,7 +516,7 @@ async function refresh() {
   ).join('') || '<div class="muted">No runs yet</div>';
   document.getElementById('runs').innerHTML = renderRuns(state);
   document.getElementById('attention').innerHTML = state.runs
-    .filter(run => ['blocked','failed','needs_review'].includes(run.state))
+    .filter(run => ['blocked','failed','interrupted','needs_review'].includes(run.state))
     .slice(0, 8).map(runHtml).join('') || '<div class="muted">Nothing needs you</div>';
   document.getElementById('events').innerHTML = state.events.slice(0, 20).map(event =>
     `<div class="event ${esc(event.level)}">
