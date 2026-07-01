@@ -172,6 +172,7 @@
     .muted { color: var(--muted); }
     .state-running { color: var(--accent); }
     .state-ready { color: var(--warn); }
+    .state-waiting_dependencies { color: var(--muted); }
     .state-blocked, .state-failed, .state-interrupted { color: var(--bad); }
     .state-done, .state-pr_open, .state-needs_review { color: var(--good); }
     .pr-status {
@@ -232,6 +233,30 @@
       flex-wrap: wrap;
       gap: 6px;
       margin-top: 8px;
+    }
+    .dependency-list {
+      display: grid;
+      gap: 5px;
+      margin-top: 8px;
+    }
+    .dependency-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 6px;
+      background: #f8fafc;
+      font-size: 12px;
+    }
+    .dependency-row span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .dependency-row button {
+      padding: 4px 7px;
+      font-size: 12px;
     }
     .feedback-box {
       width: 100%;

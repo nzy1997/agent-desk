@@ -19,7 +19,7 @@ from agent_desk.dashboard import (
     run_viewer_html,
     serve_dashboard,
 )
-from agent_desk.dependencies import DependencyGraph, IssueDependencies
+from agent_desk.dependencies import Dependency, DependencyGraph, IssueDependencies
 from agent_desk.scheduler import RunNextResult, Scheduler
 from agent_desk.store import Store
 
@@ -534,6 +534,15 @@ class DashboardTests(unittest.TestCase):
         # Picker follows the selected project, not a separate repo dropdown.
         self.assertNotIn('id="include-repo"', HTML)
 
+    def test_dashboard_html_renders_dependency_override_controls(self):
+        self.assertIn("/api/actions/dependency-override", HTML)
+        self.assertIn("/api/actions/dependency-edge", HTML)
+        self.assertIn("satisfyDependency", HTML)
+        self.assertIn("addDependencyEdge", HTML)
+        self.assertIn("removeDependencyEdge", HTML)
+        self.assertIn("dependencyEdgesHtml", HTML)
+        self.assertIn("dependencyOverridesHtml", HTML)
+
     def test_dashboard_html_renders_workspace_settings_controls(self):
         self.assertIn("/api/settings", HTML)
         self.assertIn("workspace_path", HTML)
@@ -555,7 +564,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("issuesLoading", HTML)
 
     def test_dashboard_html_includes_interrupted_attention_state(self):
-        self.assertIn("['blocked','failed','interrupted','needs_review']", HTML)
+        self.assertIn("needsAttention(run)", HTML)
+        self.assertIn("!isDependencyWaiting(run)", HTML)
 
     def test_restart_process_reexecs_agent_desk_module(self):
         scheduler = _RestartScheduler()
@@ -1026,6 +1036,118 @@ class IssuePickerRouteTests(unittest.TestCase):
                 )[0],
                 400,
             )
+
+    def test_dependency_override_route_satisfies_and_clears_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/example", local_path=root / "example")],
+            )
+
+            def extractor(repo_name, issues):
+                graph_issues = []
+                for issue in issues:
+                    deps = []
+                    if int(issue["number"]) == 6:
+                        deps.append(
+                            Dependency(
+                                repo=repo_name,
+                                number=5,
+                                evidence="Depends on #5",
+                                confidence="high",
+                            )
+                        )
+                    graph_issues.append(IssueDependencies(number=int(issue["number"]), depends_on=deps))
+                return DependencyGraph(repo=repo_name, issues=graph_issues, warnings=[])
+
+            scheduler = Scheduler(config, store, github=_IncludeIssueGitHub(), dependency_extractor=extractor)
+            scheduler.sync_repo_issues("octo/example")
+            scheduler.mark_issues_ready("octo/example", [6], dependency_mode="analyze")
+            port = self._serve(store, scheduler)
+
+            status, payload = self._request(
+                port,
+                "/api/actions/dependency-override",
+                {
+                    "repo": "octo/example",
+                    "issue": 6,
+                    "dependency_repo": "octo/example",
+                    "dependency": 5,
+                    "satisfied": True,
+                    "reason": "milestone already completed",
+                },
+            )
+
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["started"])
+            record = store.get_record("octo/example", 6)
+            self.assertEqual(record["state"], "ready")
+            self.assertEqual(record["dependency_overrides"][0]["number"], 5)
+
+            status, payload = self._request(
+                port,
+                "/api/actions/dependency-override",
+                {
+                    "repo": "octo/example",
+                    "issue": 6,
+                    "dependency_repo": "octo/example",
+                    "dependency": 5,
+                    "satisfied": False,
+                },
+            )
+
+            self.assertEqual(status, 200)
+            self.assertFalse(payload["started"])
+            record = store.get_record("octo/example", 6)
+            self.assertEqual(record["state"], "waiting_dependencies")
+            self.assertEqual(record["dependency_overrides"], [])
+            self.assertEqual(record["blocked_by"][0]["number"], 5)
+
+    def test_dependency_edge_route_adds_and_removes_manual_dependency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, scheduler = self._build(tmp)
+            scheduler.sync_repo_issues("octo/example")
+            scheduler.mark_issue_ready("octo/example", 6)
+            port = self._serve(store, scheduler)
+
+            status, payload = self._request(
+                port,
+                "/api/actions/dependency-edge",
+                {
+                    "repo": "octo/example",
+                    "issue": 6,
+                    "dependency_repo": "octo/example",
+                    "dependency": 5,
+                    "present": True,
+                    "evidence": "manual repair",
+                },
+            )
+
+            self.assertEqual(status, 200)
+            self.assertFalse(payload["started"])
+            record = store.get_record("octo/example", 6)
+            self.assertEqual(record["state"], "waiting_dependencies")
+            self.assertEqual(record["dependencies"][0]["number"], 5)
+
+            status, payload = self._request(
+                port,
+                "/api/actions/dependency-edge",
+                {
+                    "repo": "octo/example",
+                    "issue": 6,
+                    "dependency_repo": "octo/example",
+                    "dependency": 5,
+                    "present": False,
+                },
+            )
+
+            self.assertEqual(status, 200)
+            self.assertTrue(payload["started"])
+            record = store.get_record("octo/example", 6)
+            self.assertEqual(record["state"], "ready")
+            self.assertEqual(record["dependencies"], [])
 
 
 if __name__ == "__main__":

@@ -213,6 +213,104 @@ function blockedByText(items) {
     return `${repo ? repo + '#' : '#'}${number}${state}`;
   }).join(', ');
 }
+function dependencyLabel(item) {
+  const repo = item.repo || '';
+  const number = item.number || '';
+  const state = item.state ? ` (${item.state})` : '';
+  return `${repo ? repo + '#' : '#'}${number}${state}`;
+}
+function satisfyDependency(issueNumber, repoName, dependencyRepo, dependencyNumber) {
+  const reason = prompt('Reason for marking this dependency satisfied?', 'manual override');
+  if (reason === null) return;
+  return postJson('/api/actions/dependency-override', {
+    repo: repoName,
+    issue: issueNumber,
+    dependency_repo: dependencyRepo,
+    dependency: dependencyNumber,
+    satisfied: true,
+    reason: reason || 'manual override'
+  });
+}
+function clearDependencyOverride(issueNumber, repoName, dependencyRepo, dependencyNumber) {
+  return postJson('/api/actions/dependency-override', {
+    repo: repoName,
+    issue: issueNumber,
+    dependency_repo: dependencyRepo,
+    dependency: dependencyNumber,
+    satisfied: false
+  });
+}
+function addDependencyEdge(issueNumber, repoName) {
+  const dependencyRepo = prompt('Dependency repo?', repoName);
+  if (dependencyRepo === null) return;
+  const rawNumber = prompt('Dependency issue number?');
+  if (rawNumber === null) return;
+  const dependencyNumber = Number(rawNumber);
+  if (!Number.isInteger(dependencyNumber) || dependencyNumber <= 0) {
+    alert('Dependency issue number must be positive');
+    return;
+  }
+  const evidence = prompt('Evidence or note?', 'manual dependency repair');
+  if (evidence === null) return;
+  return postJson('/api/actions/dependency-edge', {
+    repo: repoName,
+    issue: issueNumber,
+    dependency_repo: dependencyRepo || repoName,
+    dependency: dependencyNumber,
+    present: true,
+    evidence: evidence || 'manual dependency repair'
+  });
+}
+function removeDependencyEdge(issueNumber, repoName, dependencyRepo, dependencyNumber) {
+  return postJson('/api/actions/dependency-edge', {
+    repo: repoName,
+    issue: issueNumber,
+    dependency_repo: dependencyRepo,
+    dependency: dependencyNumber,
+    present: false
+  });
+}
+function dependencyEdgesHtml(run) {
+  const items = run.dependencies || [];
+  if (!items.length) return '';
+  const rows = items.map(item => {
+    const repo = item.repo || run.repo_name || '';
+    const number = Number(item.number || 0);
+    const evidence = item.evidence ? ` · ${esc(item.evidence)}` : '';
+    return `<div class="dependency-row">
+      <span>${esc(repo)}#${number}${evidence}</span>
+      <button onclick="removeDependencyEdge(${run.issue_number}, ${jsString(run.repo_name)}, ${jsString(repo)}, ${number})">Remove</button>
+    </div>`;
+  }).join('');
+  return `<div class="dependency-list"><div class="muted">Depends on</div>${rows}</div>`;
+}
+function blockedDependenciesHtml(run) {
+  const items = run.blocked_by || [];
+  if (!items.length) return '';
+  const rows = items.map(item => {
+    const repo = item.repo || run.repo_name || '';
+    const number = Number(item.number || 0);
+    return `<div class="dependency-row">
+      <span>${esc(dependencyLabel(item))}</span>
+      <button onclick="satisfyDependency(${run.issue_number}, ${jsString(run.repo_name)}, ${jsString(repo)}, ${number})">Satisfy</button>
+    </div>`;
+  }).join('');
+  return `<div class="dependency-list"><div class="muted">Waiting for</div>${rows}</div>`;
+}
+function dependencyOverridesHtml(run) {
+  const overrides = (run.dependency_overrides || []).filter(item => item.state === 'satisfied');
+  if (!overrides.length) return '';
+  const rows = overrides.map(item => {
+    const repo = item.repo || run.repo_name || '';
+    const number = Number(item.number || 0);
+    const reason = item.reason ? ` · ${esc(item.reason)}` : '';
+    return `<div class="dependency-row">
+      <span>Manually satisfied ${esc(repo)}#${number}${reason}</span>
+      <button onclick="clearDependencyOverride(${run.issue_number}, ${jsString(run.repo_name)}, ${jsString(repo)}, ${number})">Undo</button>
+    </div>`;
+  }).join('');
+  return `<div class="dependency-list">${rows}</div>`;
+}
 async function addSelected(mode) {
   const repo = currentRepoName;
   if (!repo) { alert('Select a project folder first'); return; }
@@ -441,15 +539,23 @@ function prStatus(run) {
   const label = labels[status] || labels.unknown;
   return `<div class="pr-status pr-status-${esc(status)}"><strong>${esc(label)}</strong><span class="muted">${summary}${fixes}</span></div>`;
 }
+function isDependencyWaiting(run) {
+  return run.state === 'waiting_dependencies' || (run.state === 'blocked' && run.stage === 'waiting for dependencies');
+}
+function needsAttention(run) {
+  return ['blocked','failed','interrupted','needs_review'].includes(run.state) && !isDependencyWaiting(run);
+}
 function runActions(run) {
   if (run.state === 'ready') {
     return `<div class="run-actions">
       <button class="primary" onclick="action('/api/run/${run.id}/start')">Run</button>
+      <button onclick="addDependencyEdge(${run.issue_number}, ${jsString(run.repo_name)})">Add dependency</button>
       <button onclick="removeIssue(${run.issue_number}, ${jsString(run.repo_name)})">Remove</button>
     </div>`;
   }
-  if (run.state === 'blocked' && run.stage === 'waiting for dependencies') {
+  if (isDependencyWaiting(run)) {
     return `<div class="run-actions">
+      <button onclick="addDependencyEdge(${run.issue_number}, ${jsString(run.repo_name)})">Add dependency</button>
       <button onclick="removeIssue(${run.issue_number}, ${jsString(run.repo_name)})">Remove</button>
     </div>`;
   }
@@ -471,13 +577,14 @@ function runActions(run) {
   return '';
 }
 function runHtml(run) {
-  const blocked = blockedByText(run.blocked_by || []);
   return `<div class="run">
     <strong>#${run.issue_number} ${esc(run.issue_title)}</strong>
     <div class="muted">${esc(run.repo_name)} · ${esc(run.branch_name)}</div>
     <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
     <div>Stage: ${esc(run.stage)}</div>
-    ${blocked ? `<div class="muted">Blocked by ${esc(blocked)}</div>` : ''}
+    ${dependencyEdgesHtml(run)}
+    ${blockedDependenciesHtml(run)}
+    ${dependencyOverridesHtml(run)}
     ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
     ${prStatus(run)}
     ${resumeCommand(run)}
@@ -532,7 +639,7 @@ async function refresh() {
   ).join('') || '<div class="muted">No runs yet</div>';
   document.getElementById('runs').innerHTML = renderRuns(state);
   document.getElementById('attention').innerHTML = state.runs
-    .filter(run => ['blocked','failed','interrupted','needs_review'].includes(run.state))
+    .filter(run => needsAttention(run))
     .slice(0, 8).map(runHtml).join('') || '<div class="muted">Nothing needs you</div>';
   document.getElementById('events').innerHTML = state.events.slice(0, 20).map(event =>
     `<div class="event ${esc(event.level)}">

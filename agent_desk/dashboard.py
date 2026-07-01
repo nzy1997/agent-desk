@@ -25,8 +25,9 @@ RUN_DISPLAY_ORDER = {
     "needs_review": 3,
     "failed": 4,
     "ready": 5,
-    "blocked": 6,
-    "done": 7,
+    "waiting_dependencies": 6,
+    "blocked": 7,
+    "done": 8,
 }
 
 
@@ -325,6 +326,72 @@ def make_handler(
                         "results": [result.__dict__ for result in results],
                     }
                 )
+                return
+            if path == "/api/actions/dependency-override":
+                payload = self._read_json()
+                repo_name = str(payload.get("repo") or "").strip()
+                if not repo_name:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                dependency_repo = str(payload.get("dependency_repo") or repo_name).strip()
+                try:
+                    issue_number = int(payload.get("issue"))
+                    dependency_number = int(payload.get("dependency"))
+                except (TypeError, ValueError):
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issue and dependency must be numbers")
+                    return
+                if issue_number <= 0 or dependency_number <= 0:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issue and dependency must be positive numbers")
+                    return
+                if payload.get("satisfied", True):
+                    result = scheduler.mark_dependency_satisfied(
+                        repo_name,
+                        issue_number,
+                        dependency_repo,
+                        dependency_number,
+                        reason=str(payload.get("reason") or "manual override"),
+                    )
+                else:
+                    result = scheduler.clear_dependency_override(
+                        repo_name,
+                        issue_number,
+                        dependency_repo,
+                        dependency_number,
+                    )
+                self._send_json(result.__dict__)
+                return
+            if path == "/api/actions/dependency-edge":
+                payload = self._read_json()
+                repo_name = str(payload.get("repo") or "").strip()
+                if not repo_name:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "repo is required")
+                    return
+                dependency_repo = str(payload.get("dependency_repo") or repo_name).strip()
+                try:
+                    issue_number = int(payload.get("issue"))
+                    dependency_number = int(payload.get("dependency"))
+                except (TypeError, ValueError):
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issue and dependency must be numbers")
+                    return
+                if issue_number <= 0 or dependency_number <= 0:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "issue and dependency must be positive numbers")
+                    return
+                if payload.get("present", True):
+                    result = scheduler.add_dependency_edge(
+                        repo_name,
+                        issue_number,
+                        dependency_repo,
+                        dependency_number,
+                        evidence=str(payload.get("evidence") or "manual dependency repair"),
+                    )
+                else:
+                    result = scheduler.remove_dependency_edge(
+                        repo_name,
+                        issue_number,
+                        dependency_repo,
+                        dependency_number,
+                    )
+                self._send_json(result.__dict__)
                 return
             if path == "/api/actions/remove-issue":
                 payload = self._read_json()

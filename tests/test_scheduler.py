@@ -76,6 +76,20 @@ class OpenIssueGitHub(RecordingGitHub):
         return self._open_issues.get(repo, [])[:limit]
 
 
+class IssueStateGitHub(OpenIssueGitHub):
+    """Serves open issue sync plus explicit issue state lookups."""
+
+    def __init__(self, open_issues, issue_states):
+        super().__init__(open_issues)
+        self.issue_states = issue_states
+
+    def get_issue(self, repo, issue_number):
+        state = self.issue_states.get((repo, int(issue_number)))
+        if state is not None:
+            return {"number": int(issue_number), **state}
+        return super().get_issue(repo, issue_number)
+
+
 class NoopScheduler(Scheduler):
     def _run_worker_for_issue(self, **kwargs):
         return None
@@ -404,10 +418,229 @@ class SchedulerTests(unittest.TestCase):
             records = {record["issue_number"]: record for record in store.list_records("octo/one")}
             self.assertEqual(records[1]["state"], "ready")
             self.assertEqual(records[1]["dependency_state"], "ready")
-            self.assertEqual(records[2]["state"], "blocked")
+            self.assertEqual(records[2]["state"], "waiting_dependencies")
             self.assertEqual(records[2]["stage"], "waiting for dependencies")
             self.assertEqual(records[2]["dependency_state"], "blocked")
             self.assertEqual(records[2]["blocked_by"][0]["number"], 1)
+
+    def test_mark_issues_ready_analyze_mode_treats_completed_github_dependency_as_satisfied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            graph = DependencyGraph(
+                repo="octo/one",
+                issues=[
+                    IssueDependencies(
+                        number=2,
+                        depends_on=[
+                            Dependency(
+                                repo="octo/one",
+                                number=1,
+                                evidence="Depends on #1",
+                                confidence="high",
+                            )
+                        ],
+                    ),
+                ],
+                warnings=[],
+            )
+            github = IssueStateGitHub(
+                {
+                    "octo/one": [
+                        {
+                            "number": 2,
+                            "title": "Follow-up",
+                            "body": "Depends on #1",
+                            "url": "https://example.test/2",
+                            "labels": [],
+                        }
+                    ]
+                },
+                {
+                    ("octo/one", 1): {
+                        "title": "Base",
+                        "body": "",
+                        "url": "https://example.test/1",
+                        "state": "closed",
+                        "stateReason": "completed",
+                        "closedAt": "2026-06-30T07:20:54Z",
+                    }
+                },
+            )
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=github,
+                dependency_extractor=RecordingDependencyExtractor(graph),
+            )
+            scheduler.sync_repo_issues("octo/one")
+
+            scheduler.mark_issues_ready("octo/one", [2], dependency_mode="analyze")
+
+            record = store.get_record("octo/one", 2)
+            self.assertEqual(record["state"], "ready")
+            self.assertEqual(record["dependency_state"], "ready")
+            self.assertEqual(record["blocked_by"], [])
+
+    def test_dependency_override_satisfies_only_selected_blocker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            graph = DependencyGraph(
+                repo="octo/one",
+                issues=[
+                    IssueDependencies(number=1, depends_on=[]),
+                    IssueDependencies(number=2, depends_on=[]),
+                    IssueDependencies(
+                        number=3,
+                        depends_on=[
+                            Dependency(repo="octo/one", number=1, evidence="Depends on #1", confidence="high"),
+                            Dependency(repo="octo/one", number=2, evidence="Depends on #2", confidence="high"),
+                        ],
+                    ),
+                ],
+                warnings=[],
+            )
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=RecordingGitHub(),
+                dependency_extractor=RecordingDependencyExtractor(graph),
+            )
+            scheduler.sync_repo_issues("octo/one")
+            scheduler.mark_issues_ready("octo/one", [1, 2, 3], dependency_mode="analyze")
+
+            first = scheduler.mark_dependency_satisfied(
+                "octo/one", 3, "octo/one", 1, reason="milestone already completed"
+            )
+
+            record = store.get_record("octo/one", 3)
+            self.assertFalse(first.started)
+            self.assertEqual(record["state"], "waiting_dependencies")
+            self.assertEqual(record["dependency_overrides"][0]["number"], 1)
+            self.assertEqual([dep["number"] for dep in record["blocked_by"]], [2])
+
+            second = scheduler.mark_dependency_satisfied("octo/one", 3, "octo/one", 2)
+
+            record = store.get_record("octo/one", 3)
+            self.assertTrue(second.started)
+            self.assertEqual(record["state"], "ready")
+            self.assertEqual(record["dependency_state"], "ready")
+            self.assertEqual(record["blocked_by"], [])
+
+    def test_dependency_override_can_be_cleared_while_still_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            graph = DependencyGraph(
+                repo="octo/one",
+                issues=[
+                    IssueDependencies(number=1, depends_on=[]),
+                    IssueDependencies(number=2, depends_on=[]),
+                    IssueDependencies(
+                        number=3,
+                        depends_on=[
+                            Dependency(repo="octo/one", number=1, evidence="Depends on #1", confidence="high"),
+                            Dependency(repo="octo/one", number=2, evidence="Depends on #2", confidence="high"),
+                        ],
+                    ),
+                ],
+                warnings=[],
+            )
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=RecordingGitHub(),
+                dependency_extractor=RecordingDependencyExtractor(graph),
+            )
+            scheduler.sync_repo_issues("octo/one")
+            scheduler.mark_issues_ready("octo/one", [1, 2, 3], dependency_mode="analyze")
+            scheduler.mark_dependency_satisfied("octo/one", 3, "octo/one", 1)
+
+            result = scheduler.clear_dependency_override("octo/one", 3, "octo/one", 1)
+
+            record = store.get_record("octo/one", 3)
+            self.assertFalse(result.started)
+            self.assertEqual(record["dependency_overrides"], [])
+            self.assertEqual([dep["number"] for dep in record["blocked_by"]], [1, 2])
+            self.assertEqual(record["state"], "waiting_dependencies")
+
+    def test_dependency_edge_repair_adds_missing_blocker_and_waits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=RecordingGitHub())
+            scheduler.sync_repo_issues("octo/one")
+            scheduler.mark_issue_ready("octo/one", 2)
+
+            result = scheduler.add_dependency_edge(
+                "octo/one",
+                2,
+                "octo/one",
+                1,
+                evidence="manual repair: depends on #1",
+            )
+
+            record = store.get_record("octo/one", 2)
+            self.assertFalse(result.started)
+            self.assertEqual(record["state"], "waiting_dependencies")
+            self.assertEqual(record["stage"], "waiting for dependencies")
+            self.assertEqual(record["dependency_state"], "blocked")
+            self.assertEqual(record["dependencies"][0]["number"], 1)
+            self.assertEqual(record["dependencies"][0]["confidence"], "manual")
+            self.assertEqual(record["blocked_by"][0]["number"], 1)
+
+    def test_dependency_edge_repair_removes_blocker_and_unlocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            graph = DependencyGraph(
+                repo="octo/one",
+                issues=[
+                    IssueDependencies(number=1, depends_on=[]),
+                    IssueDependencies(
+                        number=2,
+                        depends_on=[Dependency(repo="octo/one", number=1, evidence="Depends on #1", confidence="high")],
+                    ),
+                ],
+                warnings=[],
+            )
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=RecordingGitHub(),
+                dependency_extractor=RecordingDependencyExtractor(graph),
+            )
+            scheduler.sync_repo_issues("octo/one")
+            scheduler.mark_issues_ready("octo/one", [1, 2], dependency_mode="analyze")
+
+            result = scheduler.remove_dependency_edge("octo/one", 2, "octo/one", 1)
+
+            record = store.get_record("octo/one", 2)
+            self.assertTrue(result.started)
+            self.assertEqual(record["state"], "ready")
+            self.assertEqual(record["dependencies"], [])
+            self.assertEqual(record["blocked_by"], [])
 
     def test_poll_once_unlocks_blocked_issue_after_dependency_done(self):
         with tempfile.TemporaryDirectory() as tmp:

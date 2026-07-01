@@ -21,6 +21,7 @@ TERMINAL_STATES = {"done", "failed", "blocked", "pr_open", "needs_review", "inte
 RUN_STATES = (
     "queued",
     "ready",
+    "waiting_dependencies",
     "running",
     "pr_open",
     "needs_review",
@@ -33,7 +34,7 @@ ALL_STATES = ("available",) + RUN_STATES
 
 # find_open_run looks for an active run, so it ignores synced-but-not-queued
 # issues and finished work.
-_OPEN_EXCLUDE = {"available", "done", "failed", "blocked"}
+_OPEN_EXCLUDE = {"available", "done", "failed", "blocked", "waiting_dependencies"}
 
 
 def utc_now() -> str:
@@ -161,6 +162,10 @@ class Store:
             "ci_fix_attempts": 0,
             "ci_fix_last_sha": "",
             "last_error": "",
+            "dependencies": [],
+            "blocked_by": [],
+            "dependency_state": "",
+            "dependency_overrides": [],
             "created_at": now,
             "updated_at": now,
             "started_at": "",

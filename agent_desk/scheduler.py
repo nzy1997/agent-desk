@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -43,6 +44,9 @@ CLOSEOUT_STAGES = {
     "auto-finishing after ci success",
     "auto-finish",
 }
+ISSUE_REFERENCE_RE = re.compile(r"(?<![\w/#])#(\d+)\b")
+DEPENDENCY_WAITING_STATE = "waiting_dependencies"
+DEPENDENCY_WAITING_STAGE = "waiting for dependencies"
 
 
 @dataclass(frozen=True)
@@ -402,8 +406,10 @@ class Scheduler:
     def unlock_ready_dependencies(self) -> list[RunNextResult]:
         results: list[RunNextResult] = []
         with self._lock:
-            for record in reversed(self.store.list_runs({"blocked"})):
+            for record in reversed(self.store.list_runs({DEPENDENCY_WAITING_STATE, "blocked"})):
                 if str(record.get("dependency_state") or "") != "blocked":
+                    continue
+                if not self._is_dependency_waiting(record):
                     continue
                 try:
                     repo = self._repo_for_run(record)
@@ -419,7 +425,9 @@ class Scheduler:
                     for dep in record.get("dependencies", [])
                     if int(dep.get("number") or 0) > 0
                 ]
-                blocked_by = self._unsatisfied_dependencies(repo, deps)
+                blocked_by = self._unsatisfied_dependencies(
+                    repo, deps, overrides=record.get("dependency_overrides") or []
+                )
                 if blocked_by:
                     self.store.update_run(record["id"], blocked_by=blocked_by)
                     continue
@@ -451,7 +459,7 @@ class Scheduler:
             "blocked_by": [],
             "dependency_state": dependency_state,
         }
-        if record is not None and record["state"] in {"available", "blocked"}:
+        if record is not None and record["state"] in {"available", "blocked", DEPENDENCY_WAITING_STATE}:
             run_id = self._promote_to_ready(repo, record, **payload)
         else:
             issue = issue or record or self._fetch_issue(repo, issue_number)
@@ -476,11 +484,211 @@ class Scheduler:
             "dependency_state": dependency_state,
             "last_error": reason,
         }
-        if record is not None and record["state"] in {"available", "blocked"}:
-            run_id = self._promote_to_blocked(repo, record, **payload)
+        if record is not None and record["state"] in {"available", "blocked", DEPENDENCY_WAITING_STATE}:
+            run_id = self._promote_to_dependency_waiting(repo, record, **payload)
         else:
-            run_id = self._create_blocked_run(repo, issue_number, issue, **payload)
+            run_id = self._create_dependency_waiting_run(repo, issue_number, issue, **payload)
         return RunNextResult(False, f"{repo.name}#{issue_number} is waiting for dependencies", run_id)
+
+    def mark_dependency_satisfied(
+        self,
+        repo_name: str,
+        issue_number: int,
+        dependency_repo: str,
+        dependency_number: int,
+        *,
+        reason: str = "manual override",
+    ) -> RunNextResult:
+        return self._set_dependency_override(
+            repo_name,
+            issue_number,
+            dependency_repo,
+            dependency_number,
+            satisfied=True,
+            reason=reason,
+        )
+
+    def clear_dependency_override(
+        self,
+        repo_name: str,
+        issue_number: int,
+        dependency_repo: str,
+        dependency_number: int,
+    ) -> RunNextResult:
+        return self._set_dependency_override(
+            repo_name,
+            issue_number,
+            dependency_repo,
+            dependency_number,
+            satisfied=False,
+            reason="",
+        )
+
+    def add_dependency_edge(
+        self,
+        repo_name: str,
+        issue_number: int,
+        dependency_repo: str,
+        dependency_number: int,
+        *,
+        evidence: str = "manual dependency repair",
+    ) -> RunNextResult:
+        repo = self._repo_by_name(repo_name)
+        if repo is None:
+            return RunNextResult(False, f"{repo_name} is not a configured repository")
+        dependency_repo = str(dependency_repo or repo.name).strip()
+        dep_number = int(dependency_number)
+        if not dependency_repo:
+            return RunNextResult(False, "dependency repo is required")
+        if dep_number <= 0:
+            return RunNextResult(False, "dependency issue must be a positive number")
+        if dependency_repo == repo.name and dep_number == int(issue_number):
+            return RunNextResult(False, "issue cannot depend on itself")
+        with self._lock:
+            record = self.store.get_record(repo.name, int(issue_number))
+            if record is None or record["state"] == "available":
+                return RunNextResult(False, f"{repo.name}#{issue_number} is not on the desk")
+            if not self._can_repair_dependencies(record):
+                return RunNextResult(
+                    False,
+                    f"{repo.name}#{issue_number} is {record['state']} and cannot repair dependencies",
+                    record["id"],
+                )
+            dependencies = self._dependencies_from_record(repo, record)
+            if not any(dep.repo == dependency_repo and dep.number == dep_number for dep in dependencies):
+                dependencies.append(
+                    Dependency(
+                        repo=dependency_repo,
+                        number=dep_number,
+                        evidence=evidence or "manual dependency repair",
+                        confidence="manual",
+                    )
+                )
+            overrides = self._dependency_overrides_without(record, repo.name, dependency_repo, dep_number)
+            return self._apply_dependency_overrides(repo, record, dependencies, overrides)
+
+    def remove_dependency_edge(
+        self,
+        repo_name: str,
+        issue_number: int,
+        dependency_repo: str,
+        dependency_number: int,
+    ) -> RunNextResult:
+        repo = self._repo_by_name(repo_name)
+        if repo is None:
+            return RunNextResult(False, f"{repo_name} is not a configured repository")
+        dependency_repo = str(dependency_repo or repo.name).strip()
+        dep_number = int(dependency_number)
+        if dep_number <= 0:
+            return RunNextResult(False, "dependency issue must be a positive number")
+        with self._lock:
+            record = self.store.get_record(repo.name, int(issue_number))
+            if record is None or record["state"] == "available":
+                return RunNextResult(False, f"{repo.name}#{issue_number} is not on the desk")
+            if not self._can_repair_dependencies(record):
+                return RunNextResult(
+                    False,
+                    f"{repo.name}#{issue_number} is {record['state']} and cannot repair dependencies",
+                    record["id"],
+                )
+            current = self._dependencies_from_record(repo, record)
+            dependencies = [
+                dep for dep in current if not (dep.repo == dependency_repo and dep.number == dep_number)
+            ]
+            if len(dependencies) == len(current):
+                return RunNextResult(
+                    False,
+                    f"{repo.name}#{issue_number} does not depend on {dependency_repo}#{dep_number}",
+                    record["id"],
+                )
+            overrides = self._dependency_overrides_without(record, repo.name, dependency_repo, dep_number)
+            return self._apply_dependency_overrides(repo, record, dependencies, overrides)
+
+    def _set_dependency_override(
+        self,
+        repo_name: str,
+        issue_number: int,
+        dependency_repo: str,
+        dependency_number: int,
+        *,
+        satisfied: bool,
+        reason: str,
+    ) -> RunNextResult:
+        repo = self._repo_by_name(repo_name)
+        if repo is None:
+            return RunNextResult(False, f"{repo_name} is not a configured repository")
+        dep_number = int(dependency_number)
+        if dep_number <= 0:
+            return RunNextResult(False, "dependency issue must be a positive number")
+        with self._lock:
+            record = self.store.get_record(repo.name, int(issue_number))
+            if record is None:
+                return RunNextResult(False, f"{repo.name}#{issue_number} is not on the desk")
+            dependencies = self._dependencies_from_record(repo, record)
+            if not any(dep.repo == dependency_repo and dep.number == dep_number for dep in dependencies):
+                return RunNextResult(False, f"{repo.name}#{issue_number} does not depend on {dependency_repo}#{dep_number}", record["id"])
+            overrides = self._dependency_overrides(record)
+            key = (dependency_repo, dep_number)
+            overrides = [
+                override
+                for override in overrides
+                if (str(override.get("repo") or repo.name), int(override.get("number") or 0)) != key
+            ]
+            if satisfied:
+                overrides.append(
+                    {
+                        "repo": dependency_repo,
+                        "number": dep_number,
+                        "state": "satisfied",
+                        "reason": reason or "manual override",
+                    }
+                )
+            return self._apply_dependency_overrides(repo, record, dependencies, overrides)
+
+    def _apply_dependency_overrides(
+        self,
+        repo: RepoConfig,
+        record: dict[str, Any],
+        dependencies: list[Dependency],
+        overrides: list[dict[str, Any]],
+    ) -> RunNextResult:
+        blocked_by = self._unsatisfied_dependencies(repo, dependencies, overrides=overrides)
+        if blocked_by:
+            self.store.update_run(
+                record["id"],
+                state=DEPENDENCY_WAITING_STATE,
+                stage=DEPENDENCY_WAITING_STAGE,
+                dependencies=[dep.as_payload() for dep in dependencies],
+                blocked_by=blocked_by,
+                dependency_state="blocked",
+                dependency_overrides=overrides,
+                last_error="waiting for dependencies",
+            )
+            self.store.add_event(
+                record["id"],
+                "info",
+                "dependencies",
+                "Dependency override updated; issue is still waiting for dependencies",
+                {"blocked_by": blocked_by, "dependency_overrides": overrides},
+            )
+            return RunNextResult(False, f"{repo.name}#{record['issue_number']} is still waiting for dependencies", record["id"])
+        run_id = self._promote_to_ready(
+            repo,
+            record,
+            dependencies=[dep.as_payload() for dep in dependencies],
+            blocked_by=[],
+            dependency_state="ready",
+            dependency_overrides=overrides,
+            last_error="",
+        )
+        self.store.add_event(
+            run_id,
+            "info",
+            "dependencies",
+            "Dependency override updated; issue is ready",
+            {"dependency_overrides": overrides},
+        )
+        return RunNextResult(True, f"Unlocked {repo.name}#{record['issue_number']}", run_id)
 
     def _issue_for_dependency_extraction(self, repo: RepoConfig, issue_number: int) -> dict:
         record = self.store.get_record(repo.name, issue_number)
@@ -499,22 +707,88 @@ class Scheduler:
             "url": str(issue.get("url") or issue.get("issue_url") or ""),
         }
 
-    def _unsatisfied_dependencies(self, repo: RepoConfig, dependencies: list[Dependency]) -> list[dict[str, Any]]:
+    def _dependencies_from_record(self, repo: RepoConfig, record: dict[str, Any]) -> list[Dependency]:
+        return [
+            Dependency(
+                repo=str(dep.get("repo") or repo.name),
+                number=int(dep.get("number") or 0),
+                evidence=str(dep.get("evidence") or ""),
+                confidence=str(dep.get("confidence") or ""),
+            )
+            for dep in record.get("dependencies", [])
+            if int(dep.get("number") or 0) > 0
+        ]
+
+    @staticmethod
+    def _dependency_overrides(record: dict[str, Any]) -> list[dict[str, Any]]:
+        overrides = []
+        for override in record.get("dependency_overrides") or []:
+            if not isinstance(override, dict):
+                continue
+            number = int(override.get("number") or 0)
+            if number <= 0:
+                continue
+            overrides.append(
+                {
+                    "repo": str(override.get("repo") or record.get("repo_name") or ""),
+                    "number": number,
+                    "state": str(override.get("state") or ""),
+                    "reason": str(override.get("reason") or ""),
+                }
+            )
+        return overrides
+
+    @classmethod
+    def _dependency_overrides_without(
+        cls,
+        record: dict[str, Any],
+        default_repo: str,
+        dependency_repo: str,
+        dependency_number: int,
+    ) -> list[dict[str, Any]]:
+        key = (dependency_repo, int(dependency_number))
+        return [
+            override
+            for override in cls._dependency_overrides(record)
+            if (str(override.get("repo") or default_repo), int(override.get("number") or 0)) != key
+        ]
+
+    @staticmethod
+    def _dependency_override_satisfied(
+        dep: Dependency, overrides: list[dict[str, Any]] | None
+    ) -> bool:
+        for override in overrides or []:
+            if str(override.get("state") or "") != "satisfied":
+                continue
+            if str(override.get("repo") or "") == dep.repo and int(override.get("number") or 0) == dep.number:
+                return True
+        return False
+
+    def _unsatisfied_dependencies(
+        self,
+        repo: RepoConfig,
+        dependencies: list[Dependency],
+        *,
+        overrides: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         blocked_by = []
         for dep in dependencies:
             if dep.number <= 0:
+                continue
+            if self._dependency_override_satisfied(dep, overrides):
                 continue
             if dep.repo != repo.name:
                 blocked_by.append({"repo": dep.repo, "number": dep.number, "state": "unknown"})
                 continue
             record = self.store.get_record(dep.repo, dep.number)
-            if record is not None and record["state"] == "done":
+            state = self._known_issue_state(repo, dep.number, record=record)
+            if self._issue_state_is_satisfied(state):
                 continue
             blocked_by.append(
                 {
                     "repo": dep.repo,
                     "number": dep.number,
-                    "state": str(record.get("state") if record else "unknown"),
+                    "state": str(state.get("local_state") or state.get("github_state") or "unknown"),
                 }
             )
         return blocked_by
@@ -523,7 +797,30 @@ class Scheduler:
     def _can_remove_from_desk(record: dict[str, Any]) -> bool:
         if record["state"] == "ready":
             return True
-        return record["state"] == "blocked" and record.get("stage") == "waiting for dependencies"
+        if record["state"] in {"failed", "interrupted"}:
+            return True
+        return Scheduler._is_dependency_waiting(record)
+
+    @staticmethod
+    def _is_dependency_waiting(record: dict[str, Any]) -> bool:
+        if record["state"] == DEPENDENCY_WAITING_STATE:
+            return True
+        return record["state"] == "blocked" and record.get("stage") == DEPENDENCY_WAITING_STAGE
+
+    @staticmethod
+    def _can_repair_dependencies(record: dict[str, Any]) -> bool:
+        return record["state"] == "ready" or Scheduler._is_dependency_waiting(record)
+
+    @staticmethod
+    def _can_refresh_synced_issue_metadata(record: dict[str, Any]) -> bool:
+        return record["state"] in {
+            "available",
+            "ready",
+            DEPENDENCY_WAITING_STATE,
+            "blocked",
+            "failed",
+            "interrupted",
+        }
 
     def _extract_dependencies_with_codex(self, repo_name: str, issues: list[dict[str, Any]]) -> DependencyGraph:
         prompt = render_dependency_prompt(repo_name, issues)
@@ -557,6 +854,52 @@ class Scheduler:
         text = payload if isinstance(payload, str) else json.dumps(payload)
         return parse_dependency_result(text, default_repo=repo_name)
 
+    def _known_issue_states_for_dependency_analysis(
+        self, repo: RepoConfig, issues: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        numbers = sorted(
+            {
+                int(match.group(1))
+                for issue in issues
+                for field in (issue.get("title"), issue.get("issue_title"), issue.get("body"), issue.get("issue_body"))
+                for match in ISSUE_REFERENCE_RE.finditer(str(field or ""))
+                if int(match.group(1)) > 0
+            }
+        )
+        return [self._known_issue_state(repo, number) for number in numbers]
+
+    def _known_issue_state(
+        self, repo: RepoConfig, issue_number: int, *, record: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        record = record if record is not None else self.store.get_record(repo.name, issue_number)
+        state: dict[str, Any] = {
+            "repo": repo.name,
+            "number": int(issue_number),
+            "local_state": str(record.get("state") or "") if record else "",
+            "github_state": "",
+            "state_reason": "",
+            "closed_at": "",
+        }
+        try:
+            issue = self.github.get_issue(repo.name, issue_number)
+        except RuntimeError:
+            issue = {}
+        state.update(
+            {
+                "github_state": str(issue.get("state") or ""),
+                "state_reason": str(issue.get("stateReason") or issue.get("state_reason") or ""),
+                "closed_at": str(issue.get("closedAt") or issue.get("closed_at") or ""),
+            }
+        )
+        return state
+
+    @staticmethod
+    def _issue_state_is_satisfied(state: dict[str, Any]) -> bool:
+        local_state = str(state.get("local_state") or "").lower()
+        github_state = str(state.get("github_state") or "").lower()
+        state_reason = str(state.get("state_reason") or "").lower()
+        return local_state == "done" or (github_state == "closed" and state_reason == "completed")
+
     def _fetch_issue(self, repo: RepoConfig, issue_number: int) -> dict:
         try:
             return self.github.get_issue(repo.name, issue_number)
@@ -571,12 +914,16 @@ class Scheduler:
         self.store.add_event(record["id"], "info", "ready", "Issue is ready to run", {"repo": repo.name})
         return record["id"]
 
-    def _promote_to_blocked(self, repo: RepoConfig, record: dict, **fields: Any) -> int:
+    def _promote_to_dependency_waiting(self, repo: RepoConfig, record: dict, **fields: Any) -> int:
         number = int(record["issue_number"])
         title = str(record.get("issue_title") or f"Issue {number}")
         branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
         self.store.update_run(
-            record["id"], state="blocked", stage="waiting for dependencies", branch_name=branch, **fields
+            record["id"],
+            state=DEPENDENCY_WAITING_STATE,
+            stage=DEPENDENCY_WAITING_STAGE,
+            branch_name=branch,
+            **fields,
         )
         self.store.add_event(record["id"], "info", "dependencies", "Issue is waiting for dependencies", fields)
         return record["id"]
@@ -599,7 +946,7 @@ class Scheduler:
         self.store.add_event(run_id, "info", "ready", "Issue is ready to run", {"repo": repo.name})
         return run_id
 
-    def _create_blocked_run(self, repo: RepoConfig, issue_number: int, issue: dict, **fields: Any) -> int:
+    def _create_dependency_waiting_run(self, repo: RepoConfig, issue_number: int, issue: dict, **fields: Any) -> int:
         title = str(issue.get("issue_title") or issue.get("title") or f"Issue {issue_number}")
         body = str(issue.get("issue_body") or issue.get("body") or "")
         url = str(issue.get("issue_url") or issue.get("url") or "")
@@ -613,7 +960,7 @@ class Scheduler:
             branch_name=branch,
             issue_body=body,
         )
-        self.store.update_run(run_id, state="blocked", stage="waiting for dependencies", **fields)
+        self.store.update_run(run_id, state=DEPENDENCY_WAITING_STATE, stage=DEPENDENCY_WAITING_STAGE, **fields)
         self.store.add_event(run_id, "info", "dependencies", "Issue is waiting for dependencies", fields)
         return run_id
 
