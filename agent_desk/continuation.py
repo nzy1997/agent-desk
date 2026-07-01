@@ -175,6 +175,13 @@ class ContinuationRunner:
             stderr_path=run_dir / f"{action}.stderr.log",
         )
         if completed.returncode != 0:
+            if completed.timeout_reason in {"timeout", "idle"}:
+                return self._interrupt_for_timeout(
+                    run_id,
+                    action,
+                    completed.timeout_reason,
+                    completed.stderr,
+                )
             summary = "codex idle timeout" if completed.timeout_reason == "idle" else f"{action} failed"
             self.store.update_run(run_id, state="failed", stage="failed", last_error=summary)
             self.store.add_event(run_id, "error", action, summary, {"detail": completed.stderr[-4000:]})
@@ -216,6 +223,26 @@ class ContinuationRunner:
         self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
         self.store.add_event(run_id, "error", "continuation", message, {})
         return ContinuationResult(False, message, run_id)
+
+    def _interrupt_for_timeout(
+        self,
+        run_id: int,
+        action: str,
+        timeout_reason: str,
+        detail: str,
+    ) -> ContinuationResult:
+        label = "idle timeout" if timeout_reason == "idle" else "timeout"
+        stage = f"interrupted by {label}"
+        summary = f"Timed out by Agent Desk {label}; resume from dashboard"
+        self.store.update_run(run_id, state="interrupted", stage=stage, last_error=summary)
+        self.store.add_event(
+            run_id,
+            "warning",
+            "timeout-interrupted",
+            summary,
+            {"action": action, "timeout_reason": timeout_reason, "detail": detail[-4000:]},
+        )
+        return ContinuationResult(False, summary, run_id)
 
     def _thread_id_for_run(self, run_id: int, run: dict[str, Any], run_dir: Path) -> str:
         thread_id = str(run.get("codex_thread_id") or "")

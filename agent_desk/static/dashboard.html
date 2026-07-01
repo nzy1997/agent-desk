@@ -378,6 +378,10 @@
           <span>Max parallel</span>
           <input id="max-concurrent-runs" type="number" min="1" step="1" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
         </label>
+        <label class="setting-row" for="worker-timeout-hours">
+          <span>Time limit (h)</span>
+          <input id="worker-timeout-hours" type="number" min="0.25" step="0.25" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+        </label>
         <label class="setting-row" for="requires-human-review">
           <span>Require human review</span>
           <input id="requires-human-review" type="checkbox" onchange="markSettingsDirty()">

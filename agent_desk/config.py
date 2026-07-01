@@ -8,6 +8,9 @@ import subprocess
 import tomllib
 
 
+DEFAULT_WORKER_TIMEOUT_SECONDS = 8 * 60 * 60
+
+
 @dataclass(frozen=True)
 class RepoConfig:
     name: str
@@ -37,7 +40,7 @@ class AgentDeskConfig:
     max_concurrent_runs: int = 3
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
-    worker_timeout_seconds: int = 7200
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS
     worker_idle_timeout_seconds: int = 600
     clone_root: Path = field(default_factory=lambda: Path.home() / ".agent-desk" / "repos")
     repos: list[RepoConfig] = field(default_factory=list)
@@ -85,7 +88,9 @@ def load_config(path: str | Path) -> AgentDeskConfig:
         max_concurrent_runs=int(desk_raw.get("max_concurrent_runs", 3)),
         dashboard_host=desk_raw.get("dashboard_host", "127.0.0.1"),
         dashboard_port=int(desk_raw.get("dashboard_port", 8765)),
-        worker_timeout_seconds=int(desk_raw.get("worker_timeout_seconds", 7200)),
+        worker_timeout_seconds=int(
+            desk_raw.get("worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)
+        ),
         worker_idle_timeout_seconds=int(desk_raw.get("worker_idle_timeout_seconds", 600)),
         clone_root=_resolve_path(root, desk_raw.get("clone_root", "~/.agent-desk/repos")),
         repos=repos,
@@ -230,7 +235,7 @@ data_dir = ".agent-desk"
 poll_interval_seconds = 60
 dashboard_host = "127.0.0.1"
 dashboard_port = 8765
-worker_timeout_seconds = 7200
+worker_timeout_seconds = 28800
 worker_idle_timeout_seconds = 600
 # Where repos cloned from the dashboard are stored (clone_root/OWNER/REPO).
 clone_root = "~/.agent-desk/repos"

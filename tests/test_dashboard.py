@@ -68,6 +68,7 @@ class _ShutdownScheduler:
     def __init__(self):
         self.shutdown_called = False
         self.resume_calls = []
+        self.interrupt_calls = []
 
     def shutdown_preview(self):
         return {
@@ -87,6 +88,10 @@ class _ShutdownScheduler:
     def resume_interrupted(self, run_id):
         self.resume_calls.append(run_id)
         return RunNextResult(True, "Resume interrupted started", run_id)
+
+    def interrupt_run(self, run_id):
+        self.interrupt_calls.append(run_id)
+        return RunNextResult(True, "Run interrupted", run_id)
 
 
 class _RestartScheduler:
@@ -226,6 +231,7 @@ class DashboardTests(unittest.TestCase):
                 "max_concurrent_runs": 2,
                 "requires_human_review": True,
                 "single_closeout_per_workspace": True,
+                "worker_timeout_seconds": 28800,
             },
         )
 
@@ -409,6 +415,9 @@ class DashboardTests(unittest.TestCase):
 
     def test_dashboard_html_renders_manual_run_and_pr_action_buttons(self):
         self.assertIn("/api/run/${run.id}/start", HTML)
+        self.assertIn("/api/run/${runId}/interrupt", HTML)
+        self.assertIn("interruptRun(", HTML)
+        self.assertIn(">Interrupt</button>", HTML)
         self.assertIn("/api/run/${runId}/request-changes", HTML)
         self.assertIn("/api/run/${run.id}/approve-finish", HTML)
         self.assertIn("Approve & finish", HTML)
@@ -423,6 +432,11 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("resumeInterrupted(", HTML)
         self.assertIn("/resume-interrupted", HTML)
         self.assertIn("resume_available", HTML)
+
+    def test_dashboard_html_renders_remove_controls_for_failed_and_interrupted_runs(self):
+        self.assertIn("run.state === 'failed'", HTML)
+        self.assertIn("run.state === 'interrupted'", HTML)
+        self.assertIn("removeIssue(${run.issue_number}, ${jsString(run.repo_name)})", HTML)
 
     def test_dashboard_html_omits_global_run_next_button(self):
         self.assertNotIn("Run next", HTML)
@@ -549,6 +563,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("Workspace Settings", HTML)
         self.assertIn("auto-start-ready", HTML)
         self.assertIn("max-concurrent-runs", HTML)
+        self.assertIn("worker-timeout-hours", HTML)
+        self.assertIn("worker_timeout_seconds", HTML)
         self.assertIn("requires-human-review", HTML)
         self.assertIn("single-closeout-per-workspace", HTML)
         self.assertIn("saveSettings()", HTML)
@@ -802,6 +818,41 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(payload["started"])
             self.assertEqual(payload["run_id"], 7)
             self.assertEqual(scheduler.resume_calls, [7])
+
+    def test_interrupt_run_route_dispatches_scheduler(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            scheduler = _ShutdownScheduler()
+            bound: dict[str, int] = {}
+            ready = threading.Event()
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "scheduler": scheduler,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+            request = urllib.request.Request(
+                f"http://{host}:{bound['port']}/api/run/7/interrupt",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read())
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(payload["started"])
+            self.assertEqual(payload["run_id"], 7)
+            self.assertEqual(scheduler.interrupt_calls, [7])
 
 
 class ServeDashboardPortTests(unittest.TestCase):

@@ -18,11 +18,41 @@ class DependencyTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("You are Agent Desk's dependency extractor.", prompt)
+        self.assertIn("You are Agent Desk's unresolved dependency extractor.", prompt)
         self.assertIn('"depends_on"', prompt)
         self.assertIn('"repo": "octo/example"', prompt)
         self.assertIn('"number": 12', prompt)
+        self.assertIn('"known_issue_states"', prompt)
+        self.assertIn("extract only explicit dependencies that are still unsatisfied", prompt)
         self.assertIn("Return JSON only", prompt)
+
+    def test_render_dependency_prompt_includes_known_completed_issue_state(self):
+        prompt = render_dependency_prompt(
+            "octo/example",
+            [
+                {
+                    "number": 12,
+                    "title": "Follow-up",
+                    "body": "Depends on #10",
+                    "url": "https://example.test/12",
+                }
+            ],
+            known_issue_states=[
+                {
+                    "repo": "octo/example",
+                    "number": 10,
+                    "local_state": "",
+                    "github_state": "closed",
+                    "state_reason": "completed",
+                    "closed_at": "2026-06-30T07:20:54Z",
+                }
+            ],
+        )
+
+        self.assertIn('"number": 10', prompt)
+        self.assertIn('"github_state": "closed"', prompt)
+        self.assertIn('"state_reason": "completed"', prompt)
+        self.assertIn("Do not include satisfied dependencies in depends_on", prompt)
 
     def test_parse_dependency_result_normalizes_dependencies(self):
         payload = {

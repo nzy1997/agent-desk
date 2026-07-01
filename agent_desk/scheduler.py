@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -10,7 +10,7 @@ import sys
 import threading
 from typing import Any, Callable
 
-from .config import AgentDeskConfig, RepoConfig
+from .config import DEFAULT_WORKER_TIMEOUT_SECONDS, AgentDeskConfig, RepoConfig
 from .continuation import ContinuationRunner
 from .dependencies import Dependency, DependencyGraph, parse_dependency_result, render_dependency_prompt
 from .github_client import GitHubClient
@@ -62,14 +62,21 @@ class SchedulerSettings:
     max_concurrent_runs: int = 1
     requires_human_review: bool = True
     single_closeout_per_workspace: bool = True
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS
 
     @classmethod
-    def from_repo(cls, repo: RepoConfig) -> "SchedulerSettings":
+    def from_repo(
+        cls,
+        repo: RepoConfig,
+        *,
+        worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    ) -> "SchedulerSettings":
         return cls(
             auto_start_ready=False,
             max_concurrent_runs=max(1, repo.max_concurrent_runs),
             requires_human_review=repo.requires_human_review,
             single_closeout_per_workspace=repo.single_closeout_per_workspace,
+            worker_timeout_seconds=max(60, int(worker_timeout_seconds)),
         )
 
     def as_payload(self) -> dict[str, bool | int]:
@@ -78,6 +85,7 @@ class SchedulerSettings:
             "max_concurrent_runs": self.max_concurrent_runs,
             "requires_human_review": self.requires_human_review,
             "single_closeout_per_workspace": self.single_closeout_per_workspace,
+            "worker_timeout_seconds": self.worker_timeout_seconds,
         }
 
 
@@ -108,7 +116,10 @@ class Scheduler:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._settings_by_workspace = {
-            self._workspace_key(repo): SchedulerSettings.from_repo(repo)
+            self._workspace_key(repo): SchedulerSettings.from_repo(
+                repo,
+                worker_timeout_seconds=config.worker_timeout_seconds,
+            )
             for repo in config.repos
         }
 
@@ -190,6 +201,66 @@ class Scheduler:
             extra_fields={"status": "signaled", "signal_results": signal_results},
         )
 
+    def interrupt_run(
+        self,
+        run_id: int,
+        controller: ProcessController | None = None,
+        *,
+        grace_seconds: float = 3.0,
+    ) -> RunNextResult:
+        process_controller = controller or LocalProcessController()
+        with self._lock:
+            run = self.store.get_run(run_id)
+            if run["state"] != "running":
+                return RunNextResult(False, f"Run #{run_id} is not running", run_id)
+            item = build_run_shutdown_item(run, process_controller)
+            if not item.get("killable"):
+                reason = "; ".join(item.get("warnings") or []) or "run supervisor is not verified"
+                return RunNextResult(False, f"Run #{run_id} cannot be safely interrupted: {reason}", run_id)
+            sid = shutdown_id()
+            manifest = write_shutdown_artifacts(
+                config=self.config,
+                shutdown_id=sid,
+                items=[item],
+                dashboard_pid=os.getpid(),
+                config_path=self.config_path,
+                extra_fields={"status": "manual-interrupt-recorded"},
+            )
+            fields = {
+                "state": "interrupted",
+                "stage": "interrupted by user",
+                "last_error": "Interrupted by user; resume from dashboard",
+                "shutdown_id": sid,
+                "shutdown_manifest": item.get("shutdown_manifest", ""),
+                "shutdown_resume_note": item.get("shutdown_resume_note", ""),
+            }
+            if item.get("codex_thread_id"):
+                fields["codex_thread_id"] = item["codex_thread_id"]
+            self.store.update_run(run_id, **fields)
+            self.store.add_event(
+                run_id,
+                "warning",
+                "user-interrupted",
+                "Run interrupted by user",
+                {
+                    "shutdown_id": sid,
+                    "manifest_path": manifest["manifest_path"],
+                    "killable": item.get("killable", False),
+                },
+            )
+        signal_results = stop_verified_process_groups(
+            [item], process_controller, grace_seconds=grace_seconds
+        )
+        write_shutdown_artifacts(
+            config=self.config,
+            shutdown_id=sid,
+            items=[item],
+            dashboard_pid=os.getpid(),
+            config_path=self.config_path,
+            extra_fields={"status": "manual-interrupt-signaled", "signal_results": signal_results},
+        )
+        return RunNextResult(True, "Run interrupted", run_id)
+
     def settings_payload(self, workspace_path: str | Path | None = None) -> dict[str, bool | int] | None:
         with self._lock:
             repo = self._repo_for_settings(workspace_path)
@@ -205,6 +276,7 @@ class Scheduler:
         max_concurrent_runs: int | None = None,
         requires_human_review: bool | None = None,
         single_closeout_per_workspace: bool | None = None,
+        worker_timeout_seconds: int | None = None,
     ) -> dict[str, bool | int]:
         with self._lock:
             repo = self._repo_for_settings(workspace_path)
@@ -222,6 +294,11 @@ class Scheduler:
                 settings.requires_human_review = bool(requires_human_review)
             if single_closeout_per_workspace is not None:
                 settings.single_closeout_per_workspace = bool(single_closeout_per_workspace)
+            if worker_timeout_seconds is not None:
+                value = int(worker_timeout_seconds)
+                if value < 60:
+                    raise ValueError("worker_timeout_seconds must be at least 60")
+                settings.worker_timeout_seconds = value
             return settings.as_payload()
 
     def serve_forever(self) -> None:
@@ -258,14 +335,28 @@ class Scheduler:
         with self._lock:
             for issue in issues:
                 number = int(issue["number"])
-                if self.store.get_record(repo.name, number) is None:
+                existing = self.store.get_record(repo.name, number)
+                fields = {
+                    "issue_title": str(issue.get("title") or ""),
+                    "issue_url": str(issue.get("url") or ""),
+                    "issue_body": str(issue.get("body") or ""),
+                }
+                if existing is None:
                     self.store.create_available(
                         repo_name=repo.name,
                         issue_number=number,
-                        issue_title=str(issue.get("title") or ""),
-                        issue_url=str(issue.get("url") or ""),
-                        issue_body=str(issue.get("body") or ""),
+                        issue_title=fields["issue_title"],
+                        issue_url=fields["issue_url"],
+                        issue_body=fields["issue_body"],
                     )
+                elif self._can_refresh_synced_issue_metadata(existing):
+                    updates = {
+                        key: value
+                        for key, value in fields.items()
+                        if str(existing.get(key) or "") != value
+                    }
+                    if updates:
+                        self.store.update_run(existing["id"], **updates)
         return self.list_repo_issues(repo_name)
 
     def list_repo_issues(self, repo_name: str) -> list[dict]:
@@ -317,17 +408,37 @@ class Scheduler:
                     f"{repo.name}#{issue_number} is {record['state']} and cannot be removed from the desk",
                     record["id"],
                 )
-            self.store.update_run(
-                record["id"],
-                state="available",
-                stage="",
-                branch_name="",
-                dependencies=[],
-                blocked_by=[],
-                dependency_state="",
-                last_error="",
-                ended_at="",
-            )
+            fields: dict[str, Any] = {
+                "state": "available",
+                "stage": "",
+                "branch_name": "",
+                "dependencies": [],
+                "blocked_by": [],
+                "dependency_state": "",
+                "last_error": "",
+                "ended_at": "",
+            }
+            if record["state"] in {"failed", "interrupted"}:
+                fields.update(
+                    {
+                        "attempt": int(record.get("attempt") or 1) + 1,
+                        "run_dir": "",
+                        "worktree_path": "",
+                        "codex_thread_id": "",
+                        "pr_url": "",
+                        "pr_ci_status": "",
+                        "pr_ci_summary": "",
+                        "pr_ci_checked_at": "",
+                        "ci_fix_attempts": 0,
+                        "ci_fix_last_sha": "",
+                        "request_changes_feedback": "",
+                        "supervisor_pid": "",
+                        "shutdown_id": "",
+                        "shutdown_manifest": "",
+                        "shutdown_resume_note": "",
+                    }
+                )
+            self.store.update_run(record["id"], **fields)
             self.store.add_event(
                 record["id"],
                 "info",
@@ -823,7 +934,9 @@ class Scheduler:
         }
 
     def _extract_dependencies_with_codex(self, repo_name: str, issues: list[dict[str, Any]]) -> DependencyGraph:
-        prompt = render_dependency_prompt(repo_name, issues)
+        repo = self._repo_by_name(repo_name)
+        known_issue_states = self._known_issue_states_for_dependency_analysis(repo, issues) if repo else []
+        prompt = render_dependency_prompt(repo_name, issues, known_issue_states=known_issue_states)
         result_dir = self.config.data_dir / "dependency-extraction"
         result_dir.mkdir(parents=True, exist_ok=True)
         result_path = result_dir / f"deps-{os.getpid()}-{threading.get_ident()}.json"
@@ -842,7 +955,11 @@ class Scheduler:
             ],
             cwd=Path.cwd(),
             stdin=prompt,
-            timeout=self.config.worker_timeout_seconds,
+            timeout=(
+                self._config_for_repo(repo).worker_timeout_seconds
+                if repo is not None
+                else self.config.worker_timeout_seconds
+            ),
             idle_timeout=self.config.worker_idle_timeout_seconds,
         )
         if completed.returncode != 0:
@@ -1281,9 +1398,25 @@ class Scheduler:
         key = self._workspace_key(repo)
         settings = self._settings_by_workspace.get(key)
         if settings is None:
-            settings = SchedulerSettings.from_repo(repo)
+            settings = SchedulerSettings.from_repo(
+                repo,
+                worker_timeout_seconds=self.config.worker_timeout_seconds,
+            )
             self._settings_by_workspace[key] = settings
         return settings
+
+    def _config_for_repo(self, repo: RepoConfig) -> AgentDeskConfig:
+        timeout = self._settings_for_repo(repo).worker_timeout_seconds
+        if timeout == self.config.worker_timeout_seconds:
+            return self.config
+        return replace(self.config, worker_timeout_seconds=timeout)
+
+    def _config_for_run_id(self, run_id: int) -> AgentDeskConfig:
+        try:
+            repo = self._repo_for_run(self.store.get_run(run_id))
+        except KeyError:
+            return self.config
+        return self._config_for_repo(repo)
 
     def _repo_for_settings(self, workspace_path: str | Path | None) -> RepoConfig | None:
         if workspace_path is None:
@@ -1351,6 +1484,8 @@ class Scheduler:
         issue_url: str,
         branch_name: str,
     ) -> None:
+        if hasattr(self.worker, "config"):
+            self.worker.config = self._config_for_repo(repo)
         self.worker.run_issue(
             run_id=run_id,
             repo=repo,
@@ -1449,7 +1584,7 @@ class Scheduler:
 
     def _run_ci_fix(self, *, run_id: int, pr_status: PullRequestChecksStatus, attempt: int) -> None:
         try:
-            self.continuation_factory(self.config, self.store).fix_ci(
+            self.continuation_factory(self._config_for_run_id(run_id), self.store).fix_ci(
                 run_id,
                 pr_status,
                 attempt=attempt,
@@ -1469,14 +1604,18 @@ class Scheduler:
                 self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
                 self.store.add_event(run_id, "error", "request-changes", message, {})
                 return
-            self.continuation_factory(self.config, self.store).request_changes(run_id, str(feedback))
+            self.continuation_factory(self._config_for_run_id(run_id), self.store).request_changes(
+                run_id, str(feedback)
+            )
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "request-changes", "Request changes failed", {"detail": str(exc)})
 
     def _run_resume_interrupted(self, *, run_id: int) -> None:
         try:
-            result = self.continuation_factory(self.config, self.store).resume_interrupted(run_id)
+            result = self.continuation_factory(
+                self._config_for_run_id(run_id), self.store
+            ).resume_interrupted(run_id)
             self._start_ci_fix_if_closeout_blocked_by_failed_checks(run_id, result)
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
@@ -1490,7 +1629,9 @@ class Scheduler:
 
     def _run_approve_finish(self, *, run_id: int) -> None:
         try:
-            result = self.continuation_factory(self.config, self.store).approve_finish(run_id)
+            result = self.continuation_factory(
+                self._config_for_run_id(run_id), self.store
+            ).approve_finish(run_id)
             self._start_ci_fix_if_closeout_blocked_by_failed_checks(run_id, result)
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
@@ -1498,7 +1639,9 @@ class Scheduler:
 
     def _run_auto_finish(self, *, run_id: int) -> None:
         try:
-            result = self.continuation_factory(self.config, self.store).finish_after_ci_success(run_id)
+            result = self.continuation_factory(
+                self._config_for_run_id(run_id), self.store
+            ).finish_after_ci_success(run_id)
             self._start_ci_fix_if_closeout_blocked_by_failed_checks(run_id, result)
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))

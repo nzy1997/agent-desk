@@ -41,6 +41,7 @@ closeout_sandbox = "danger-full-access"
         self.assertEqual(config.data_dir, Path(tmp) / ".agent-desk")
         self.assertEqual(config.poll_interval_seconds, 15)
         self.assertEqual(config.max_concurrent_runs, 3)
+        self.assertEqual(config.worker_timeout_seconds, 28800)
         self.assertEqual(config.worker_idle_timeout_seconds, 33)
         self.assertEqual(len(config.repos), 1)
         repo = config.repos[0]
@@ -76,6 +77,25 @@ local_path = "/repo"
         self.assertFalse(repo.auto_start_ready)
         self.assertEqual(repo.max_concurrent_runs, 1)
         self.assertTrue(repo.requires_human_review)
+
+    def test_default_worker_timeout_is_eight_hours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "repos.toml"
+            config_path.write_text(
+                """
+[agent_desk]
+data_dir = ".agent-desk"
+
+[[repos]]
+name = "octo/example"
+local_path = "/repo"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.worker_timeout_seconds, 8 * 60 * 60)
 
     def test_parse_github_repo_name_from_common_remote_urls(self):
         self.assertEqual(parse_github_repo_name("git@github.com:octo/example.git"), "octo/example")
@@ -128,6 +148,7 @@ closeout_sandbox = "danger-full-access"
     def test_example_config_omits_issue_label_mutation_settings(self):
         text = example_config()
 
+        self.assertIn("worker_timeout_seconds = 28800", text)
         self.assertNotIn("ready_label", text)
         self.assertNotIn("running_label", text)
         self.assertNotIn("pr_open_label", text)

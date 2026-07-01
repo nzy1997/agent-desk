@@ -417,6 +417,10 @@ def make_handler(
                 run_id = int(path.split("/")[3])
                 self._send_json(scheduler.start_run(run_id).__dict__)
                 return
+            if path.startswith("/api/run/") and path.endswith("/interrupt"):
+                run_id = int(path.split("/")[3])
+                self._send_json(scheduler.interrupt_run(run_id).__dict__)
+                return
             if path.startswith("/api/run/") and path.endswith("/request-changes"):
                 run_id = int(path.split("/")[3])
                 feedback = str(self._read_json().get("feedback") or "")
@@ -511,6 +515,9 @@ def make_handler(
                             "single_closeout_per_workspace"
                         )
                         if "single_closeout_per_workspace" in payload
+                        else None,
+                        worker_timeout_seconds=payload.get("worker_timeout_seconds")
+                        if "worker_timeout_seconds" in payload
                         else None,
                     )
                 except (TypeError, ValueError) as exc:

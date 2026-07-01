@@ -56,7 +56,7 @@ class GitHubClient:
                 "--repo",
                 repo,
                 "--json",
-                "number,title,body,url",
+                "number,title,body,url,state,stateReason,closedAt",
             ],
             text=True,
             capture_output=True,

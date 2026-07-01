@@ -162,7 +162,7 @@ class FakeCommandRunner(CommandRunner):
             stdout_path.write_text(result.stdout, encoding="utf-8")
         if stderr_path:
             stderr_path.write_text(result.stderr, encoding="utf-8")
-        return CommandResult(argv, result.returncode, result.stdout, result.stderr)
+        return CommandResult(argv, result.returncode, result.stdout, result.stderr, result.timeout_reason)
 
 
 class Worker:
@@ -260,14 +260,15 @@ class Worker:
             stdout_path=run_dir / "stdout.jsonl",
             stderr_path=run_dir / "stderr.log",
         )
-        if codex.returncode != 0:
-            summary = "codex idle timeout" if codex.timeout_reason == "idle" else "codex exec failed"
-            return self._fail(run_id, run_dir, "failed", summary, codex.stderr)
-
         thread_id = extract_thread_id(codex.stdout)
         if thread_id:
             self.store.update_run(run_id, codex_thread_id=thread_id)
             self._write_resume_log(run_dir, thread_id, worktree_path)
+        if codex.returncode != 0:
+            if codex.timeout_reason in {"timeout", "idle"}:
+                return self._interrupt_for_timeout(run_id, run_dir, codex.timeout_reason, codex.stderr)
+            summary = "codex exec failed"
+            return self._fail(run_id, run_dir, "failed", summary, codex.stderr)
 
         payload = self._parse_worker_result(result_path, codex.stdout)
         status = str(payload.get("status", "failed"))
@@ -351,6 +352,23 @@ class Worker:
         self.store.update_run(run_id, state=state, stage=state, last_error=summary)
         self.store.add_event(run_id, "error", state, summary, {"detail": detail[-4000:]})
         return WorkerResult(state, summary, [], [], [detail], "", [], run_dir)
+
+    def _interrupt_for_timeout(
+        self, run_id: int, run_dir: Path, timeout_reason: str, detail: str
+    ) -> WorkerResult:
+        label = "idle timeout" if timeout_reason == "idle" else "timeout"
+        stage = f"interrupted by {label}"
+        summary = f"Timed out by Agent Desk {label}; resume from dashboard"
+        (run_dir / "error.log").write_text(detail, encoding="utf-8")
+        self.store.update_run(run_id, state="interrupted", stage=stage, last_error=summary)
+        self.store.add_event(
+            run_id,
+            "warning",
+            "timeout-interrupted",
+            summary,
+            {"timeout_reason": timeout_reason, "detail": detail[-4000:]},
+        )
+        return WorkerResult("interrupted", summary, [], [], [detail], "", [], run_dir)
 
     def _parse_worker_result(self, result_path: Path, stdout: str) -> dict[str, Any]:
         candidates = []

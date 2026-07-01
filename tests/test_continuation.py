@@ -117,6 +117,53 @@ class ContinuationTests(unittest.TestCase):
         self.assertNotEqual(run["ended_at"], "old-ended-at")
         self.assertTrue(any("resume-interrupted" in arg for arg in runner.calls[0].argv))
 
+    def test_resume_interrupted_timeout_remains_interrupted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            worktree = root / "worktree"
+            worktree.mkdir()
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Shutdown",
+                issue_url="u5",
+                branch_name="b5",
+            )
+            store.update_run(
+                run_id,
+                state="interrupted",
+                stage="interrupted by timeout",
+                run_dir=str(run_dir),
+                worktree_path=str(worktree),
+                codex_thread_id="thread",
+            )
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        -9,
+                        "",
+                        "agent-desk: timeout timeout killed process after 28800.0s\n",
+                        timeout_reason="timeout",
+                    )
+                ]
+            )
+            config = AgentDeskConfig(
+                data_dir=root,
+                repos=[RepoConfig(name="octo/example", local_path=root)],
+            )
+
+            result = ContinuationRunner(config, store, runner=runner).resume_interrupted(run_id)
+            run = store.get_run(run_id)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(run["state"], "interrupted")
+        self.assertEqual(run["stage"], "interrupted by timeout")
+        self.assertIn("Timed out", run["last_error"])
+
     def test_request_changes_resumes_original_codex_thread_with_feedback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

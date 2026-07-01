@@ -35,9 +35,26 @@ class DependencyGraph:
     warnings: list[str]
 
 
-def render_dependency_prompt(repo_name: str, issues: list[dict[str, Any]]) -> str:
+def render_dependency_prompt(
+    repo_name: str,
+    issues: list[dict[str, Any]],
+    *,
+    known_issue_states: list[dict[str, Any]] | None = None,
+) -> str:
     payload = {
         "repo": repo_name,
+        "known_issue_states": [
+            {
+                "repo": str(state.get("repo") or repo_name),
+                "number": int(state.get("number") or 0),
+                "local_state": str(state.get("local_state") or ""),
+                "github_state": str(state.get("github_state") or state.get("state") or ""),
+                "state_reason": str(state.get("state_reason") or state.get("stateReason") or ""),
+                "closed_at": str(state.get("closed_at") or state.get("closedAt") or ""),
+            }
+            for state in known_issue_states or []
+            if int(state.get("number") or 0) > 0
+        ],
         "issues": [
             {
                 "number": int(issue["number"]),
@@ -48,13 +65,16 @@ def render_dependency_prompt(repo_name: str, issues: list[dict[str, Any]]) -> st
             for issue in issues
         ],
     }
-    return f"""You are Agent Desk's dependency extractor.
+    return f"""You are Agent Desk's unresolved dependency extractor.
 
-Given a JSON list of GitHub issues, extract only explicit dependencies between issues.
-A dependency means the current issue should not be worked on until the referenced issue is complete.
+Given selected GitHub issues plus known issue states, extract only explicit dependencies that are still unsatisfied.
+A dependency is satisfied when known_issue_states says local_state is "done", or github_state is "closed" and state_reason is "completed".
 
 Do not infer dependencies from vague wording, roadmap order, numbering, milestones, or implementation intuition.
 Only use explicit text such as "depends on", "blocked by", "requires", "after #N", checklist dependency sections, or direct issue references in a dependency context.
+Do not include satisfied dependencies in depends_on. Mention satisfied dependencies in notes if useful.
+If an explicit dependency has unknown status, include it in depends_on and note that the status is unknown.
+Do not treat historical context like "Issue #335 added ..." as a blocker unless the issue also uses explicit dependency wording.
 
 Return JSON only, matching this schema:
 {{

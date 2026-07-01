@@ -3,7 +3,7 @@ data_dir = ".agent-desk"
 poll_interval_seconds = 60
 dashboard_host = "127.0.0.1"
 dashboard_port = 8765
-worker_timeout_seconds = 7200
+worker_timeout_seconds = 28800
 worker_idle_timeout_seconds = 600
 # Where repos cloned from the dashboard are stored (clone_root/OWNER/REPO).
 clone_root = "~/.agent-desk/repos"

@@ -380,6 +380,62 @@ class WorkerTests(unittest.TestCase):
             self.assertIn(thread_id, resume_log.read_text(encoding="utf-8"))
             self.assertIn("codex resume --include-non-interactive", resume_log.read_text(encoding="utf-8"))
 
+    def test_worker_marks_codex_timeout_as_interrupted_with_resume_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_path = root / "repo"
+            repo_path.mkdir()
+            config = AgentDeskConfig(data_dir=root / "data", worker_timeout_seconds=12)
+            repo = RepoConfig(
+                name="octo/example",
+                local_path=repo_path,
+                base_branch="main",
+                test_command="python -m unittest",
+                push_pr=False,
+            )
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name=repo.name,
+                issue_number=12,
+                issue_title="Long run",
+                issue_url="https://github.com/octo/example/issues/12",
+                branch_name="agent/issue-12-long-run",
+            )
+            thread_id = "019ed932-fe5d-7391-b856-98b2239a6380"
+            runner = FakeCommandRunner(
+                results=[
+                    CommandResult(["git", "fetch"], 0, "", ""),
+                    CommandResult(["git", "worktree"], 0, "", ""),
+                    CommandResult(
+                        ["codex", "exec"],
+                        -9,
+                        f'{{"type":"thread.started","thread_id":"{thread_id}"}}\n',
+                        "agent-desk: timeout timeout killed process after 12.0s\n",
+                        timeout_reason="timeout",
+                    ),
+                ]
+            )
+
+            result = Worker(config, store, runner).run_issue(
+                run_id=run_id,
+                repo=repo,
+                issue_number=12,
+                issue_title="Long run",
+                issue_body="Body",
+                issue_url="https://github.com/octo/example/issues/12",
+                branch_name="agent/issue-12-long-run",
+            )
+            run = store.get_run(run_id)
+            resume_log = config.data_dir / "runs" / f"run-{run_id}" / "codex-resume.txt"
+            resume_text = resume_log.read_text(encoding="utf-8")
+
+        self.assertEqual(result.status, "interrupted")
+        self.assertEqual(run["state"], "interrupted")
+        self.assertEqual(run["stage"], "interrupted by timeout")
+        self.assertIn("Timed out", run["last_error"])
+        self.assertEqual(run["codex_thread_id"], thread_id)
+        self.assertIn(thread_id, resume_text)
+
     def test_extract_thread_id_ignores_non_thread_events(self):
         stdout = "\n".join(
             [

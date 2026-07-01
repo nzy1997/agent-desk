@@ -428,6 +428,7 @@ function settingsControls() {
   return [
     document.getElementById('auto-start-ready'),
     document.getElementById('max-concurrent-runs'),
+    document.getElementById('worker-timeout-hours'),
     document.getElementById('requires-human-review'),
     document.getElementById('single-closeout-per-workspace'),
     document.getElementById('settings-save')
@@ -453,11 +454,16 @@ function renderSettings(state) {
     auto_start_ready: false,
     max_concurrent_runs: 1,
     requires_human_review: true,
-    single_closeout_per_workspace: true
+    single_closeout_per_workspace: true,
+    worker_timeout_seconds: 28800
   };
   setSettingsDisabled(!project);
   document.getElementById('auto-start-ready').checked = !!settings.auto_start_ready;
   document.getElementById('max-concurrent-runs').value = Number(settings.max_concurrent_runs || 1);
+  const timeoutHours = Number(settings.worker_timeout_seconds || 28800) / 3600;
+  document.getElementById('worker-timeout-hours').value = Number.isInteger(timeoutHours)
+    ? String(timeoutHours)
+    : String(Math.round(timeoutHours * 100) / 100);
   document.getElementById('requires-human-review').checked = settings.requires_human_review !== false;
   document.getElementById('single-closeout-per-workspace').checked = settings.single_closeout_per_workspace !== false;
   document.getElementById('settings-status').textContent = project ? `Settings for ${project.name}` : 'Select a folder';
@@ -470,12 +476,19 @@ async function saveSettings() {
   }
   const maxInput = document.getElementById('max-concurrent-runs');
   const max = Math.max(1, Number(maxInput.value || 1));
+  const timeoutInput = document.getElementById('worker-timeout-hours');
+  const timeoutHours = Number(timeoutInput.value || 8);
+  const timeoutSeconds = Math.max(
+    60,
+    Math.round((Number.isFinite(timeoutHours) && timeoutHours > 0 ? timeoutHours : 8) * 3600)
+  );
   settingsDirty = false;
   try {
     await postJson('/api/settings', {
       workspace_path: path,
       auto_start_ready: document.getElementById('auto-start-ready').checked,
       max_concurrent_runs: max,
+      worker_timeout_seconds: timeoutSeconds,
       requires_human_review: document.getElementById('requires-human-review').checked,
       single_closeout_per_workspace: document.getElementById('single-closeout-per-workspace').checked
     });
@@ -524,6 +537,23 @@ function requestChanges(runId) {
 function resumeInterrupted(runId) {
   return postJson(`/api/run/${runId}/resume-interrupted`, {});
 }
+async function interruptRun(runId) {
+  if (!confirm('Interrupt this running Codex job? It will be marked interrupted and can be resumed.')) return;
+  try {
+    const res = await fetch(`/api/run/${runId}/interrupt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(result.message || 'Could not interrupt the run'); return; }
+    if (!result.started) { alert(result.message || 'Run could not be interrupted'); return; }
+  } catch (error) {
+    alert(error.message || String(error));
+    return;
+  }
+  await refresh();
+}
 function prStatus(run) {
   if (!run.pr_url) return '';
   const status = run.pr_ci_status || 'unknown';
@@ -546,6 +576,11 @@ function needsAttention(run) {
   return ['blocked','failed','interrupted','needs_review'].includes(run.state) && !isDependencyWaiting(run);
 }
 function runActions(run) {
+  if (run.state === 'running') {
+    return `<div class="run-actions">
+      <button onclick="interruptRun(${run.id})">Interrupt</button>
+    </div>`;
+  }
   if (run.state === 'ready') {
     return `<div class="run-actions">
       <button class="primary" onclick="action('/api/run/${run.id}/start')">Run</button>
@@ -566,13 +601,21 @@ function runActions(run) {
         <button class="primary" onclick="action('/api/run/${run.id}/approve-finish')">Approve & finish</button>
       </div>`;
   }
+  if (run.state === 'failed') {
+    return `<div class="run-actions">
+      <button onclick="removeIssue(${run.issue_number}, ${jsString(run.repo_name)})">Remove</button>
+    </div>`;
+  }
   if (run.state === 'interrupted') {
+    const remove = `<button onclick="removeIssue(${run.issue_number}, ${jsString(run.repo_name)})">Remove</button>`;
     if (run.resume_available) {
       return `<div class="run-actions">
         <button class="primary" onclick="resumeInterrupted(${run.id})">Resume</button>
+        ${remove}
       </div>`;
     }
-    return `<div class="muted">Resume unavailable: ${esc(run.resume_unavailable_reason || 'missing resume metadata')}</div>`;
+    return `<div class="muted">Resume unavailable: ${esc(run.resume_unavailable_reason || 'missing resume metadata')}</div>
+      <div class="run-actions">${remove}</div>`;
   }
   return '';
 }

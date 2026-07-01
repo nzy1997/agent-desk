@@ -257,6 +257,55 @@ class SchedulerTests(unittest.TestCase):
             scheduler.sync_repo_issues("octo/one")
             self.assertEqual(store.dashboard_state()["stats"]["ready"], 4)
 
+    def test_sync_refreshes_existing_ready_issue_body_before_dependency_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            github = RecordingGitHub()
+            github.issues["octo/one"][1]["body"] = "Depends on E3."
+
+            def extractor(repo_name, issues):
+                graph_issues = []
+                for issue in issues:
+                    depends_on = []
+                    if "Depends on #1" in str(issue.get("body") or ""):
+                        depends_on.append(
+                            Dependency(
+                                repo=repo_name,
+                                number=1,
+                                evidence="Depends on #1",
+                                confidence="high",
+                            )
+                        )
+                    graph_issues.append(
+                        IssueDependencies(number=int(issue["number"]), depends_on=depends_on)
+                    )
+                return DependencyGraph(repo=repo_name, issues=graph_issues, warnings=[])
+
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=github,
+                dependency_extractor=extractor,
+            )
+            scheduler.sync_repo_issues("octo/one")
+            scheduler.mark_issue_ready("octo/one", 2)
+            github.issues["octo/one"][1]["body"] = "Depends on #1."
+
+            scheduler.sync_repo_issues("octo/one")
+            scheduler.remove_issue_from_desk("octo/one", 2)
+            scheduler.mark_issues_ready("octo/one", [2], dependency_mode="analyze")
+
+            record = store.get_record("octo/one", 2)
+            self.assertEqual(record["issue_body"], "Depends on #1.")
+            self.assertEqual(record["state"], "waiting_dependencies")
+            self.assertEqual(record["dependencies"][0]["number"], 1)
+            self.assertEqual(record["blocked_by"][0]["number"], 1)
+
     def test_list_repo_issues_flags_on_desk_issues(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -364,6 +413,46 @@ class SchedulerTests(unittest.TestCase):
             self.assertFalse(result.started)
             self.assertIn("cannot be removed", result.message)
             self.assertEqual(store.get_record("octo/one", 1)["state"], "running")
+
+    def test_remove_issue_from_desk_returns_failed_and_interrupted_to_available(self):
+        for terminal_state in ("failed", "interrupted"):
+            with self.subTest(terminal_state=terminal_state):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    store = Store(root / "desk.sqlite")
+                    config = AgentDeskConfig(
+                        data_dir=root / "data",
+                        repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                    )
+                    scheduler = NoopScheduler(config, store, github=RecordingGitHub())
+                    scheduler.sync_repo_issues("octo/one")
+                    run_id = scheduler.mark_issue_ready("octo/one", 1).run_id
+                    store.update_run(
+                        run_id,
+                        state=terminal_state,
+                        stage=terminal_state,
+                        run_dir="/tmp/run-1",
+                        worktree_path="/tmp/worktree-1",
+                        codex_thread_id="thread-1",
+                        supervisor_pid=1234,
+                    )
+
+                    result = scheduler.remove_issue_from_desk("octo/one", 1)
+
+                    self.assertTrue(result.started)
+                    record = store.get_record("octo/one", 1)
+                    self.assertEqual(record["state"], "available")
+                    self.assertEqual(record["stage"], "")
+                    self.assertEqual(record["attempt"], 2)
+                    self.assertEqual(record["run_dir"], "")
+                    self.assertEqual(record["worktree_path"], "")
+                    self.assertEqual(record["codex_thread_id"], "")
+                    self.assertEqual(record["supervisor_pid"], "")
+                    self.assertEqual(store.list_runs(), [])
+
+                    readied = scheduler.mark_issue_ready("octo/one", 1)
+                    rerun = store.get_run(readied.run_id)
+                    self.assertEqual(rerun["branch_name"], "agent/issue-1-first-run-2")
 
     def test_mark_issues_ready_direct_mode_queues_every_selected_issue(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -710,7 +799,9 @@ class SchedulerTests(unittest.TestCase):
             call = runner.calls[0]
             self.assertIn("codex", call.argv)
             self.assertIn("--output-last-message", call.argv)
-            self.assertIn("You are Agent Desk's dependency extractor.", call.stdin)
+            self.assertIn("You are Agent Desk's unresolved dependency extractor.", call.stdin)
+            self.assertIn('"known_issue_states"', call.stdin)
+            self.assertIn('"number": 1', call.stdin)
             self.assertEqual(graph.issues[0].depends_on[0].number, 1)
 
     def test_mark_issue_ready_rejects_unconfigured_repo(self):
@@ -908,6 +999,74 @@ class SchedulerTests(unittest.TestCase):
             self.assertTrue((run_dir / f"shutdown-{result['shutdown_id']}.json").exists())
             self.assertEqual(result["signal_results"][0]["result"], "killed")
 
+    def test_interrupt_run_marks_one_running_run_interrupted_and_signals_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "data" / "runs" / "issue-1" / "run-1"
+            run_dir.mkdir(parents=True)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(
+                config,
+                store,
+                github=FakeGitHub(),
+                config_path=root / "repos.toml",
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+            store.update_run(
+                run_id,
+                state="running",
+                stage="running codex",
+                run_dir=str(run_dir),
+                worktree_path=str(root / "worktree"),
+                codex_thread_id="thread",
+                supervisor_pid=111,
+            )
+            other_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=2,
+                issue_title="Second",
+                issue_url="https://example.test/2",
+                branch_name="agent/issue-2",
+            )
+            store.update_run(other_id, state="running", stage="running codex")
+            controller = FakeShutdownController(
+                {
+                    111: ProcessInfo(
+                        pid=111,
+                        ppid=1,
+                        pgid=111,
+                        command=(
+                            "python -m agent_desk run-job --config config/repos.toml "
+                            f"--run-id {run_id} --kind issue"
+                        ),
+                    )
+                }
+            )
+            controller.alive = {111: True}
+
+            result = scheduler.interrupt_run(run_id, controller=controller, grace_seconds=0)
+            run = store.get_run(run_id)
+            other_run = store.get_run(other_id)
+
+        self.assertTrue(result.started)
+        self.assertEqual(run["state"], "interrupted")
+        self.assertEqual(run["stage"], "interrupted by user")
+        self.assertIn("Interrupted by user", run["last_error"])
+        self.assertEqual(other_run["state"], "running")
+        self.assertEqual(controller.terminated, [111])
+        self.assertEqual(controller.killed, [111])
+        self.assertTrue(any(event["event_type"] == "user-interrupted" for event in run["events"]))
+
     def test_resume_interrupted_dispatches_detached_job(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1053,6 +1212,29 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(settings["single_closeout_per_workspace"])
         self.assertFalse(updated["single_closeout_per_workspace"])
 
+    def test_runtime_settings_include_worker_timeout_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    worker_timeout_seconds=28800,
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+
+            settings = scheduler.settings_payload(root / "one")
+            updated = scheduler.update_settings(
+                workspace_path=root / "one",
+                worker_timeout_seconds=14400,
+            )
+
+        self.assertEqual(settings["worker_timeout_seconds"], 28800)
+        self.assertEqual(updated["worker_timeout_seconds"], 14400)
+
     def test_workspace_settings_default_to_manual_single_worker_with_human_review(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1068,6 +1250,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(settings["auto_start_ready"])
         self.assertEqual(settings["max_concurrent_runs"], 1)
         self.assertTrue(settings["requires_human_review"])
+        self.assertEqual(settings["worker_timeout_seconds"], 28800)
 
     def test_workspace_settings_reset_auto_start_to_false_on_scheduler_start(self):
         with tempfile.TemporaryDirectory() as tmp:
