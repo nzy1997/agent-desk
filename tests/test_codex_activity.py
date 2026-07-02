@@ -204,17 +204,17 @@ class CodexActivityTests(unittest.TestCase):
             first = monitor.poll(now=time.monotonic())
 
             try:
-                child_rollout.chmod(0)
+                child_rollout.unlink()
                 try:
-                    with child_rollout.open("r", encoding="utf-8"):
-                        self.skipTest("chmod(0) did not block rollout file reads on this platform")
-                except PermissionError:
-                    pass
-
+                    child_rollout.symlink_to("missing-rollout-target.jsonl")
+                except (NotImplementedError, OSError) as exc:
+                    self.fail(f"symlink-based fallback test could not be set up: {exc}")
                 second = monitor.poll(now=time.monotonic())
                 third = monitor.poll(now=time.monotonic())
             finally:
-                child_rollout.chmod(0o600)
+                if child_rollout.exists() or child_rollout.is_symlink():
+                    child_rollout.unlink()
+                child_rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
 
         self.assertTrue(first.active)
         self.assertIn(child, first.detail)
