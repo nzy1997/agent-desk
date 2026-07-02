@@ -88,6 +88,7 @@ class CodexThreadActivityMonitor:
         self._file_states: dict[Path, FileState] = {}
         self._last_poll_at = 0.0
         self._disabled = False
+        self._root_thread_id: str | None = None
 
     def poll(self, *, now: float | None = None) -> ActivitySignal:
         if self._disabled:
@@ -140,7 +141,7 @@ class CodexThreadActivityMonitor:
         with self.stdout_path.open("r", encoding="utf-8", errors="replace") as handle:
             handle.seek(self._stdout_offset)
             for line in handle:
-                found.update(self._ids_from_line(line))
+                found.update(self._ids_from_stdout_line(line))
             self._stdout_offset = handle.tell()
         return found
 
@@ -161,6 +162,21 @@ class CodexThreadActivityMonitor:
         except json.JSONDecodeError:
             return set()
         return extract_thread_ids_from_payload(payload)
+
+    def _ids_from_stdout_line(self, line: str) -> set[str]:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            return set()
+        found = extract_thread_ids_from_payload(payload)
+        if isinstance(payload, dict) and payload.get("type") == "thread.started":
+            thread_id = payload.get("thread_id")
+            if isinstance(thread_id, str) and _looks_like_thread_id(thread_id):
+                self._root_thread_id = thread_id
+                found.discard(thread_id)
+        if self._root_thread_id is not None:
+            found.discard(self._root_thread_id)
+        return found
 
     def _rollout_path_for_thread(self, thread_id: str) -> Path | None:
         cached = self._rollout_paths.get(thread_id)

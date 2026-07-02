@@ -110,6 +110,68 @@ class CodexActivityTests(unittest.TestCase):
         self.assertTrue(signal.active)
         self.assertIn(grandchild, signal.detail)
 
+    def test_parent_thread_started_rollout_does_not_count_as_descendant_activity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout_path = root / "stdout.jsonl"
+            codex_home = root / "codex"
+            sessions = codex_home / "sessions" / "2026" / "07" / "02"
+            sessions.mkdir(parents=True)
+            parent = "019f1e7f-2c4c-7063-af43-6e97371de397"
+            parent_rollout = sessions / f"rollout-2026-07-02T00-24-38-{parent}.jsonl"
+            parent_rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+            stdout_path.write_text(
+                json.dumps({"type": "thread.started", "thread_id": parent}) + "\n",
+                encoding="utf-8",
+            )
+            monitor = CodexThreadActivityMonitor(
+                stdout_path,
+                codex_home=codex_home,
+                poll_interval_seconds=0,
+            )
+
+            first = monitor.poll(now=time.monotonic())
+            with parent_rollout.open("a", encoding="utf-8") as handle:
+                handle.write('{"type":"agent_message","text":"parent still running"}\n')
+            second = monitor.poll(now=time.monotonic())
+
+        self.assertFalse(first.active)
+        self.assertFalse(second.active)
+
+    def test_discovered_child_without_rollout_stays_inactive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout_path = root / "stdout.jsonl"
+            codex_home = root / "codex"
+            sessions = codex_home / "sessions" / "2026" / "07" / "02"
+            sessions.mkdir(parents=True)
+            child = "019f1e7f-2c4c-7063-af43-6e97371de397"
+            stdout_path.write_text(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "collab_tool_call",
+                            "tool": "spawn_agent",
+                            "receiver_thread_ids": [child],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            monitor = CodexThreadActivityMonitor(
+                stdout_path,
+                codex_home=codex_home,
+                poll_interval_seconds=0,
+            )
+
+            signal = monitor.poll(now=time.monotonic())
+
+        self.assertFalse(signal.active)
+        self.assertEqual(signal.source, "")
+        self.assertEqual(signal.detail, "")
+
 
 if __name__ == "__main__":
     unittest.main()
