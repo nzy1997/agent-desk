@@ -487,8 +487,18 @@ class WorkerTests(unittest.TestCase):
 
     def test_is_codex_json_command_detects_exec_and_resume(self):
         self.assertTrue(is_codex_json_command(["codex", "exec", "--json"]))
+        self.assertTrue(
+            is_codex_json_command(["codex", "--ask-for-approval", "never", "exec", "--json"])
+        )
         self.assertTrue(is_codex_json_command(["codex", "exec", "resume", "--json"]))
         self.assertFalse(is_codex_json_command(["codex", "exec"]))
+        self.assertFalse(is_codex_json_command(["codex", "exec", "resume"]))
+        self.assertFalse(is_codex_json_command(["codex", "foo", "exec", "--json"]))
+        self.assertFalse(
+            is_codex_json_command(
+                ["codex", "--ask-for-approval", "never", "foo", "exec", "--json"]
+            )
+        )
         self.assertFalse(is_codex_json_command([sys.executable, "-c", "print('x')"]))
 
     def test_command_runner_counts_child_thread_activity(self):

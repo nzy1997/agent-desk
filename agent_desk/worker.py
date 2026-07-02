@@ -52,7 +52,62 @@ def is_codex_json_command(argv: Sequence[str]) -> bool:
         return False
     if Path(argv[0]).name != "codex":
         return False
-    return "exec" in argv and "--json" in argv
+
+    options_with_values = {
+        "--ask-for-approval",
+        "--output-last-message",
+        "--output-schema",
+        "--sandbox",
+        "-C",
+    }
+
+    def next_token_index(tokens: Sequence[str], index: int) -> int:
+        token = tokens[index]
+        if token == "--":
+            return len(tokens)
+        if token.startswith("--") and "=" in token:
+            return index + 1
+        if token in options_with_values:
+            return index + 2
+        if token.startswith("-"):
+            return index + 1
+        return index + 1
+
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "exec":
+            break
+        if not token.startswith("-"):
+            return False
+        index = next_token_index(argv, index)
+
+    if index >= len(argv) or argv[index] != "exec":
+        return False
+
+    exec_args = argv[index + 1 :]
+    if "--json" not in exec_args:
+        return False
+
+    position = 0
+    first_positional: str | None = None
+    while position < len(exec_args):
+        token = exec_args[position]
+        if token == "--":
+            break
+        if token.startswith("--") and "=" in token:
+            position += 1
+            continue
+        if token in options_with_values:
+            position += 2
+            continue
+        if token.startswith("-"):
+            position += 1
+            continue
+        first_positional = token
+        break
+
+    return first_positional in {None, "resume"}
 
 
 class CommandRunner:
