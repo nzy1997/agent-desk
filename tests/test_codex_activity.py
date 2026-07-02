@@ -180,6 +180,8 @@ class CodexActivityTests(unittest.TestCase):
             sessions = codex_home / "sessions" / "2026" / "07" / "02"
             sessions.mkdir(parents=True)
             child = "019f1e7f-2c4c-7063-af43-6e97371de397"
+            child_rollout = sessions / f"rollout-2026-07-02T00-24-38-{child}.jsonl"
+            child_rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
             stdout_path.write_text(
                 json.dumps(
                     {
@@ -199,15 +201,25 @@ class CodexActivityTests(unittest.TestCase):
                 codex_home=codex_home,
                 poll_interval_seconds=0,
             )
-            monitor._rollout_path_for_thread = lambda thread_id: (_ for _ in ()).throw(
-                OSError("boom")
-            )
-
             first = monitor.poll(now=time.monotonic())
-            second = monitor.poll(now=time.monotonic())
 
-        self.assertFalse(first.active)
+            try:
+                child_rollout.chmod(0)
+                try:
+                    with child_rollout.open("r", encoding="utf-8"):
+                        self.skipTest("chmod(0) did not block rollout file reads on this platform")
+                except PermissionError:
+                    pass
+
+                second = monitor.poll(now=time.monotonic())
+                third = monitor.poll(now=time.monotonic())
+            finally:
+                child_rollout.chmod(0o600)
+
+        self.assertTrue(first.active)
+        self.assertIn(child, first.detail)
         self.assertFalse(second.active)
+        self.assertFalse(third.active)
         self.assertTrue(monitor._disabled)
 
 
