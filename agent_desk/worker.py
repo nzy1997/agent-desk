@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import threading
 import time
 from typing import Any
 
+from .codex_activity import CodexThreadActivityMonitor
 from .config import AgentDeskConfig, RepoConfig
 from .prompt import render_worker_prompt
 from .store import Store
@@ -45,6 +47,14 @@ class WorkerResult:
     run_dir: Path
 
 
+def is_codex_json_command(argv: Sequence[str]) -> bool:
+    if not argv:
+        return False
+    if Path(argv[0]).name != "codex":
+        return False
+    return "exec" in argv and "--json" in argv
+
+
 class CommandRunner:
     def run(
         self,
@@ -56,20 +66,33 @@ class CommandRunner:
         idle_timeout: float | None = None,
         stdout_path: Path | None = None,
         stderr_path: Path | None = None,
+        activity_monitor: CodexThreadActivityMonitor | None = None,
+        activity_monitor_poll_interval: float = 5.0,
     ) -> CommandResult:
         started_at = time.monotonic()
-        last_output_at = started_at
+        last_activity_at = started_at
+        last_activity_source = "process start"
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         lock = threading.Lock()
         stdout_handle = stdout_path.open("w", encoding="utf-8") if stdout_path else None
         stderr_handle = stderr_path.open("w", encoding="utf-8") if stderr_path else None
 
-        def append_output(chunks: list[str], handle: Any, text: str) -> None:
-            nonlocal last_output_at
+        def mark_activity(source: str) -> None:
+            nonlocal last_activity_at, last_activity_source
+            with lock:
+                last_activity_at = time.monotonic()
+                last_activity_source = source
+
+        def append_output(
+            chunks: list[str], handle: Any, text: str, *, counts_as_activity: bool = True
+        ) -> None:
+            nonlocal last_activity_at, last_activity_source
             with lock:
                 chunks.append(text)
-                last_output_at = time.monotonic()
+                if counts_as_activity:
+                    last_activity_at = time.monotonic()
+                    last_activity_source = "parent output"
                 if handle:
                     handle.write(text)
                     handle.flush()
@@ -77,7 +100,7 @@ class CommandRunner:
         def read_stream(stream: Any, chunks: list[str], handle: Any) -> None:
             try:
                 for line in stream:
-                    append_output(chunks, handle, line)
+                    append_output(chunks, handle, line, counts_as_activity=True)
             finally:
                 stream.close()
 
@@ -104,13 +127,23 @@ class CommandRunner:
             except BrokenPipeError:
                 pass
 
+        if activity_monitor is None and stdout_path is not None and is_codex_json_command(argv):
+            activity_monitor = CodexThreadActivityMonitor(
+                stdout_path,
+                poll_interval_seconds=activity_monitor_poll_interval,
+            )
+
         timeout_reason = ""
         while process.poll() is None:
             now = time.monotonic()
+            if activity_monitor is not None:
+                signal = activity_monitor.poll(now=now)
+                if signal.active:
+                    mark_activity(f"{signal.source} {signal.detail}".strip())
             if timeout is not None and now - started_at >= timeout:
                 timeout_reason = "timeout"
                 break
-            if idle_timeout is not None and now - last_output_at >= idle_timeout:
+            if idle_timeout is not None and now - last_activity_at >= idle_timeout:
                 timeout_reason = "idle"
                 break
             time.sleep(0.05)
@@ -124,12 +157,13 @@ class CommandRunner:
 
         if timeout_reason:
             elapsed = time.monotonic() - started_at
-            idle_for = time.monotonic() - last_output_at
+            idle_for = time.monotonic() - last_activity_at
             append_output(
                 stderr_chunks,
                 stderr_handle,
                 f"\nagent-desk: {timeout_reason} timeout killed process after {elapsed:.1f}s"
-                f" (idle for {idle_for:.1f}s)\n",
+                f" (idle for {idle_for:.1f}s; last activity: {last_activity_source})\n",
+                counts_as_activity=False,
             )
 
         if stdout_handle:
@@ -155,6 +189,8 @@ class FakeCommandRunner(CommandRunner):
         idle_timeout: float | None = None,
         stdout_path: Path | None = None,
         stderr_path: Path | None = None,
+        activity_monitor: CodexThreadActivityMonitor | None = None,
+        activity_monitor_poll_interval: float = 5.0,
     ) -> CommandResult:
         self.calls.append(CommandCall(argv, cwd, stdin, timeout, idle_timeout))
         result = self.results.pop(0)

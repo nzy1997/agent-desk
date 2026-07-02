@@ -1,12 +1,23 @@
+import json
+import threading
 import tempfile
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from agent_desk.config import AgentDeskConfig, RepoConfig
+from agent_desk.codex_activity import CodexThreadActivityMonitor
 from agent_desk.store import Store
-from agent_desk.worker import CommandResult, CommandRunner, FakeCommandRunner, Worker, extract_thread_id
+from agent_desk.worker import (
+    CommandResult,
+    CommandRunner,
+    FakeCommandRunner,
+    Worker,
+    extract_thread_id,
+    is_codex_json_command,
+)
 
 
 class WorkerTests(unittest.TestCase):
@@ -473,6 +484,92 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("first event", stdout_text)
         self.assertIn("idle timeout", result.stderr)
         self.assertIn("idle timeout", stderr_text)
+
+    def test_is_codex_json_command_detects_exec_and_resume(self):
+        self.assertTrue(is_codex_json_command(["codex", "exec", "--json"]))
+        self.assertTrue(is_codex_json_command(["codex", "exec", "resume", "--json"]))
+        self.assertFalse(is_codex_json_command(["codex", "exec"]))
+        self.assertFalse(is_codex_json_command([sys.executable, "-c", "print('x')"]))
+
+    def test_command_runner_counts_child_thread_activity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout_path = root / "stdout.jsonl"
+            stderr_path = root / "stderr.log"
+            codex_home = root / "codex"
+            sessions = codex_home / "sessions" / "2026" / "07" / "02"
+            sessions.mkdir(parents=True)
+            child = "019f1e7f-2c4c-7063-af43-6e97371de397"
+            child_rollout = sessions / f"rollout-2026-07-02T00-24-38-{child}.jsonl"
+            child_rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+
+            def write_child_activity():
+                time.sleep(0.08)
+                for index in range(5):
+                    with child_rollout.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({"event": index}) + "\n")
+                    time.sleep(0.08)
+
+            writer = threading.Thread(target=write_child_activity)
+            writer.start()
+            script = (
+                "import json, time; "
+                f"print(json.dumps({{'item': {{'receiver_thread_ids': ['{child}']}}}}), flush=True); "
+                "time.sleep(0.55)"
+            )
+
+            monitor = CodexThreadActivityMonitor(
+                stdout_path,
+                codex_home=codex_home,
+                poll_interval_seconds=0.02,
+            )
+            result = CommandRunner().run(
+                [sys.executable, "-c", script],
+                timeout=5,
+                idle_timeout=0.2,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                activity_monitor=monitor,
+            )
+            writer.join(timeout=1)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.timeout_reason, "")
+
+    def test_command_runner_times_out_when_child_thread_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout_path = root / "stdout.jsonl"
+            stderr_path = root / "stderr.log"
+            codex_home = root / "codex"
+            sessions = codex_home / "sessions" / "2026" / "07" / "02"
+            sessions.mkdir(parents=True)
+            child = "019f1e7f-2c4c-7063-af43-6e97371de397"
+            child_rollout = sessions / f"rollout-2026-07-02T00-24-38-{child}.jsonl"
+            child_rollout.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+            script = (
+                "import json, time; "
+                f"print(json.dumps({{'item': {{'receiver_thread_ids': ['{child}']}}}}), flush=True); "
+                "time.sleep(3)"
+            )
+
+            monitor = CodexThreadActivityMonitor(
+                stdout_path,
+                codex_home=codex_home,
+                poll_interval_seconds=0.02,
+            )
+            result = CommandRunner().run(
+                [sys.executable, "-c", script],
+                timeout=5,
+                idle_timeout=0.2,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                activity_monitor=monitor,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.timeout_reason, "idle")
+        self.assertIn("last activity:", result.stderr)
 
 
 if __name__ == "__main__":
