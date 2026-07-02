@@ -172,6 +172,44 @@ class CodexActivityTests(unittest.TestCase):
         self.assertEqual(signal.source, "")
         self.assertEqual(signal.detail, "")
 
+    def test_monitor_filesystem_oserror_disables_future_polling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stdout_path = root / "stdout.jsonl"
+            codex_home = root / "codex"
+            sessions = codex_home / "sessions" / "2026" / "07" / "02"
+            sessions.mkdir(parents=True)
+            child = "019f1e7f-2c4c-7063-af43-6e97371de397"
+            stdout_path.write_text(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "collab_tool_call",
+                            "tool": "spawn_agent",
+                            "receiver_thread_ids": [child],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            monitor = CodexThreadActivityMonitor(
+                stdout_path,
+                codex_home=codex_home,
+                poll_interval_seconds=0,
+            )
+            monitor._rollout_path_for_thread = lambda thread_id: (_ for _ in ()).throw(
+                OSError("boom")
+            )
+
+            first = monitor.poll(now=time.monotonic())
+            second = monitor.poll(now=time.monotonic())
+
+        self.assertFalse(first.active)
+        self.assertFalse(second.active)
+        self.assertTrue(monitor._disabled)
+
 
 if __name__ == "__main__":
     unittest.main()
