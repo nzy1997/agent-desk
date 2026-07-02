@@ -154,7 +154,7 @@ class CodexThreadActivityMonitor:
             for line in handle:
                 found.update(self._ids_from_line(line))
             self._rollout_offsets[path] = handle.tell()
-        return found
+        return self._exclude_root_thread_id(found)
 
     def _ids_from_line(self, line: str) -> set[str]:
         try:
@@ -177,6 +177,11 @@ class CodexThreadActivityMonitor:
         if self._root_thread_id is not None:
             found.discard(self._root_thread_id)
         return found
+
+    def _exclude_root_thread_id(self, thread_ids: set[str]) -> set[str]:
+        if self._root_thread_id is None:
+            return thread_ids
+        return {thread_id for thread_id in thread_ids if thread_id != self._root_thread_id}
 
     def _rollout_path_for_thread(self, thread_id: str) -> Path | None:
         cached = self._rollout_paths.get(thread_id)
