@@ -154,7 +154,28 @@ class GitHubClient:
         except json.JSONDecodeError:
             detail = completed.stderr.strip() or "Could not parse PR checks"
             return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=pr_view.head_sha, checks=[])
+        if not isinstance(raw_checks, list):
+            return PullRequestChecksStatus(
+                state="unknown",
+                summary="Unexpected PR checks JSON",
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
+        if not raw_checks:
+            return PullRequestChecksStatus(
+                state="no_ci",
+                summary="No checks reported",
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
         checks = normalize_checks(raw_checks)
+        if not checks:
+            return PullRequestChecksStatus(
+                state="unknown",
+                summary="No valid PR checks reported",
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
         state, summary = summarize_checks(checks)
         return PullRequestChecksStatus(state=state, summary=summary, head_sha=pr_view.head_sha, checks=checks)
 
@@ -208,11 +229,15 @@ def normalize_checks(raw_checks: Any) -> list[dict[str, Any]]:
     for item in raw_checks:
         if not isinstance(item, dict):
             continue
+        state = str(item.get("state") or "")
+        bucket = str(item.get("bucket") or "")
+        if not state and not bucket:
+            continue
         checks.append(
             {
                 "name": str(item.get("name") or ""),
-                "state": str(item.get("state") or ""),
-                "bucket": str(item.get("bucket") or ""),
+                "state": state,
+                "bucket": bucket,
                 "description": str(item.get("description") or ""),
                 "link": str(item.get("link") or ""),
                 "workflow": str(item.get("workflow") or ""),
@@ -234,10 +259,13 @@ def summarize_checks(checks: list[dict[str, Any]]) -> tuple[str, str]:
     pending = sum(1 for check in checks if check_pending(check))
     passed = sum(1 for check in checks if check_passed(check))
     skipped = sum(1 for check in checks if check_skipped(check))
+    unknown = len(checks) - failed - pending - passed - skipped
     if failed:
         state = "failure"
     elif pending:
         state = "pending"
+    elif unknown:
+        state = "unknown"
     else:
         state = "success"
     parts = []
@@ -249,6 +277,8 @@ def summarize_checks(checks: list[dict[str, Any]]) -> tuple[str, str]:
         parts.append(count_phrase(pending, "pending"))
     if skipped:
         parts.append(count_phrase(skipped, "skipped"))
+    if unknown:
+        parts.append(count_phrase(unknown, "unknown"))
     return state, ", ".join(parts) or "No checks reported"
 
 

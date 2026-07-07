@@ -1612,6 +1612,116 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(ai_review.calls, [(run_id, pr_status)])
         self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
 
+    def test_ai_review_approval_rechecks_pr_head_before_auto_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            reviewed_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            current_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="def456",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            github = FakePullRequestGitHub(current_status)
+            ai_review = FakeAIReviewRunner(store, status="approved", message="review approved")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=github,
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=reviewed_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(github.pr_status_calls, [("octo/one", "https://github.com/octo/one/pull/9")])
+        self.assertEqual(run["state"], "pr_open")
+        self.assertEqual(run["stage"], "ai-review stale")
+        self.assertEqual(run["pr_ci_status"], "success")
+        self.assertEqual(run["ai_review_status"], "")
+        self.assertIn("PR head changed", run["last_error"])
+        self.assertEqual(ai_review.calls, [(run_id, reviewed_status)])
+        self.assertEqual(continuation.calls, [])
+
+    def test_ai_review_approval_rechecks_failed_pr_gate_before_auto_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            reviewed_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            current_status = PullRequestChecksStatus(
+                state="failure",
+                summary="1 failed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "FAILURE"}],
+            )
+            github = FakePullRequestGitHub(current_status)
+            ai_review = FakeAIReviewRunner(store, status="approved", message="review approved")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=github,
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=reviewed_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(github.pr_status_calls, [("octo/one", "https://github.com/octo/one/pull/9")])
+        self.assertEqual(run["state"], "running")
+        self.assertEqual(run["stage"], "auto-fixing ci (1/3)")
+        self.assertEqual(run["pr_ci_status"], "failure")
+        self.assertEqual(ai_review.calls, [(run_id, reviewed_status)])
+        self.assertEqual(continuation.calls, [(run_id, current_status, 1, 3)])
+
     def test_ai_review_changes_requested_dispatches_request_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

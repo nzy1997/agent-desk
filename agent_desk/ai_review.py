@@ -66,7 +66,7 @@ class AIReviewRunner:
             "--ask-for-approval",
             "never",
             "--sandbox",
-            "workspace-write",
+            "read-only",
             "-C",
             str(worktree_path),
             "exec",
@@ -234,7 +234,7 @@ def parse_ai_review_result(result_path: Path, stdout: str) -> AIReviewPayload:
     candidates.extend(line for line in stdout.splitlines() if line.strip())
     for candidate in candidates:
         parsed = parse_json_object(candidate)
-        if parsed and "status" in parsed:
+        if parsed and parsed.get("status") in {"approved", "changes_requested", "blocked"}:
             return normalize_ai_review_payload(parsed)
     raise ValueError("Could not parse AI review result JSON")
 

@@ -1707,7 +1707,7 @@ class Scheduler:
                 pr_status,
             )
             if result.status == "approved":
-                self._start_auto_finish(self.store.get_run(run_id), pr_status, source="ai-review")
+                self._start_auto_finish_after_ai_review(run_id, pr_status)
                 return
             if result.status == "changes_requested":
                 run = self.store.get_run(run_id)
@@ -1735,6 +1735,77 @@ class Scheduler:
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "ai-review", "AI review failed", {"detail": str(exc)})
+
+    def _start_auto_finish_after_ai_review(
+        self,
+        run_id: int,
+        reviewed_status: PullRequestChecksStatus,
+    ) -> None:
+        run = self.store.get_run(run_id)
+        repo = self._repo_for_run(run)
+        pr_url = str(run.get("pr_url") or "")
+        try:
+            current_status = self.github.pr_checks_status(repo.name, pr_url)
+        except Exception as exc:
+            message = f"Could not refresh PR checks after AI review: {exc}"
+            self.store.update_run(
+                run_id,
+                state="pr_open",
+                stage="ai-review waiting for pr gate",
+                pr_ci_status="unknown",
+                pr_ci_summary=str(exc),
+                pr_ci_checked_at=utc_now(),
+                last_error=message,
+            )
+            self.store.add_event(run_id, "warning", "ai-review", message, {"detail": str(exc)})
+            return
+        self.store.update_run(
+            run_id,
+            pr_ci_status=current_status.state,
+            pr_ci_summary=current_status.summary,
+            pr_ci_checked_at=utc_now(),
+        )
+        if current_status.state == "failure":
+            self._handle_failed_ci(self.store.get_run(run_id), current_status)
+            return
+        if current_status.state not in {"success", "no_ci"}:
+            message = f"AI review approved but PR gate is {current_status.state}: {current_status.summary}"
+            self.store.update_run(
+                run_id,
+                state="pr_open",
+                stage="ai-review waiting for pr gate",
+                last_error=message,
+            )
+            self.store.add_event(
+                run_id,
+                "warning",
+                "ai-review",
+                "AI review approved before PR gate was ready",
+                {"state": current_status.state, "summary": current_status.summary},
+            )
+            return
+        reviewed_head = str(reviewed_status.head_sha or run.get("ai_review_head_sha") or "")
+        current_head = str(current_status.head_sha or "")
+        if not reviewed_head or not current_head or reviewed_head != current_head:
+            message = "PR head changed after AI review; waiting for a fresh review"
+            self.store.update_run(
+                run_id,
+                state="pr_open",
+                stage="ai-review stale",
+                ai_review_status="",
+                ai_review_summary=message,
+                ai_review_feedback="",
+                last_error=message,
+            )
+            self.store.add_event(
+                run_id,
+                "warning",
+                "ai-review",
+                message,
+                {"reviewed_head_sha": reviewed_head, "current_head_sha": current_head},
+            )
+            return
+        self._start_auto_finish(self.store.get_run(run_id), current_status, source="ai-review")
 
     def _start_ci_fix_if_closeout_blocked_by_failed_checks(self, run_id: int, result) -> None:
         if getattr(result, "ok", True):

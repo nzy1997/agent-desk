@@ -122,7 +122,10 @@ class AIReviewTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertEqual(result.status, "approved")
             self.assertEqual(call.cwd, worktree)
-            self.assertIn("codex", call.argv)
+            self.assertEqual(
+                call.argv[:8],
+                ["codex", "--ask-for-approval", "never", "--sandbox", "read-only", "-C", str(worktree), "exec"],
+            )
             self.assertIn("--output-last-message", call.argv)
             self.assertEqual(run["state"], "pr_open")
             self.assertEqual(run["stage"], "ai-review approved")
@@ -146,6 +149,7 @@ class AIReviewTests(unittest.TestCase):
                 [
                     '{"type":"thread.started","thread_id":"thread-1"}',
                     '{"type":"token.delta","delta":"thinking"}',
+                    '{"status":"running","summary":"internal event"}',
                     '{"status":"approved","summary":"Looks good","findings":[],"feedback":"","risks":[],"pr_url":"https://github.com/octo/example/pull/9"}',
                 ]
             )
