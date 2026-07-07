@@ -155,11 +155,15 @@ class RecordingDependencyExtractor:
 
 
 class FakeContinuationRunner:
-    def __init__(self):
+    def __init__(self, store=None):
+        self.store = store
         self.calls = []
 
     def request_changes(self, run_id, feedback):
         self.calls.append(("request_changes", run_id, feedback))
+        if self.store is not None:
+            self.store.update_run(run_id, state="pr_open", stage="changes addressed", last_error="")
+        return ContinuationResult(True, "changes addressed", run_id)
 
     def approve_finish(self, run_id):
         self.calls.append(("approve_finish", run_id))
@@ -169,6 +173,7 @@ class FakeContinuationRunner:
 
     def finish_after_ci_success(self, run_id):
         self.calls.append(("finish_after_ci_success", run_id))
+        return ContinuationResult(True, "finished", run_id)
 
 
 class FakeAIReviewRunner:
@@ -1638,7 +1643,7 @@ class SchedulerTests(unittest.TestCase):
                 message="needs regression",
                 feedback="Please add a regression test for escaped commas.",
             )
-            continuation = FakeContinuationRunner()
+            continuation = FakeContinuationRunner(store)
             scheduler = NoopScheduler(
                 AgentDeskConfig(
                     data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
@@ -1696,6 +1701,57 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(run["state"], "blocked")
         self.assertEqual(run["stage"], "ai-review blocked")
+        self.assertEqual(continuation.calls, [])
+
+    def test_monitor_prs_unknown_status_is_inert_even_with_ai_review_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="unknown",
+                summary="Checks still pending",
+                head_sha="abc123",
+                checks=[],
+            )
+            ai_review = FakeAIReviewRunner(store, status="approved", message="should not run")
+            continuation = FakeContinuationRunner(store)
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                requires_human_review=False,
+                enable_ai_review=True,
+            )
+
+            scheduler.monitor_prs()
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["state"], "pr_open")
+        self.assertEqual(run["stage"], "pull request opened")
+        self.assertEqual(run["pr_ci_status"], "unknown")
+        self.assertEqual(ai_review.calls, [])
         self.assertEqual(continuation.calls, [])
 
     def test_auto_finish_blocked_by_late_failing_checks_starts_auto_fix(self):
@@ -2081,6 +2137,38 @@ class DetachedJobTests(unittest.TestCase):
             scheduler.run_job(run_id, "request-changes")
 
             self.assertEqual(continuation.calls, [("request_changes", run_id, "please tighten the tests")])
+
+    def test_run_request_changes_does_not_normalize_success_without_store_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                self._config(root),
+                store,
+                github=FakeGitHub(),
+                continuation_factory=lambda config, store: continuation,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="T",
+                issue_url="u8",
+                branch_name="agent/issue-8",
+            )
+            store.update_run(
+                run_id,
+                state="running",
+                stage="request-changes queued",
+                request_changes_feedback="please tighten the tests",
+            )
+
+            scheduler._run_request_changes(run_id=run_id)
+            run = store.get_run(run_id)
+
+        self.assertEqual(continuation.calls, [("request_changes", run_id, "please tighten the tests")])
+        self.assertEqual(run["state"], "running")
+        self.assertEqual(run["stage"], "request-changes queued")
 
     def test_run_job_closeout_kinds_call_continuation(self):
         for kind, expected in [

@@ -1657,15 +1657,9 @@ class Scheduler:
                 self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
                 self.store.add_event(run_id, "error", "request-changes", message, {})
                 return
-            result = self.continuation_factory(self._config_for_run_id(run_id), self.store).request_changes(
+            self.continuation_factory(self._config_for_run_id(run_id), self.store).request_changes(
                 run_id, str(feedback)
             )
-            run = self.store.get_run(run_id)
-            if getattr(result, "ok", True) and run["state"] == "running" and str(run.get("stage") or "") in {
-                "request-changes queued",
-                "request-changes",
-            }:
-                self.store.update_run(run_id, state="pr_open", stage="changes addressed", last_error="")
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "request-changes", "Request changes failed", {"detail": str(exc)})
