@@ -565,6 +565,7 @@ function prStatus(run) {
     pending: 'CI running',
     success: 'CI passed',
     failure: 'CI failed',
+    no_ci: 'No CI',
     unknown: 'CI unknown'
   };
   const summary = run.pr_ci_summary ? ` · ${esc(run.pr_ci_summary)}` : '';
@@ -572,6 +573,20 @@ function prStatus(run) {
   const fixes = attempts ? ` · fixes ${attempts}/3` : '';
   const label = labels[status] || labels.unknown;
   return `<div class="pr-status pr-status-${esc(status)}"><strong>${esc(label)}</strong><span class="muted">${summary}${fixes}</span></div>`;
+}
+function aiReviewStatus(run) {
+  const status = run.ai_review_status || '';
+  const running = String(run.stage || '').startsWith('ai-review') && run.state === 'running';
+  if (!status && !running) return '';
+  const labels = {
+    approved: 'AI review approved',
+    changes_requested: 'AI review changes requested',
+    blocked: 'AI review blocked'
+  };
+  const label = running ? 'AI review running' : (labels[status] || 'AI review');
+  const summary = run.ai_review_summary ? ` · ${esc(run.ai_review_summary)}` : '';
+  const cls = running ? 'running' : esc(status || 'unknown');
+  return `<div class="ai-review-status ai-review-status-${cls}"><strong>${esc(label)}</strong><span class="muted">${summary}</span></div>`;
 }
 function isDependencyWaiting(run) {
   return run.state === 'waiting_dependencies' || (run.state === 'blocked' && run.stage === 'waiting for dependencies');
@@ -634,6 +649,7 @@ function runHtml(run) {
     ${dependencyOverridesHtml(run)}
     ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
     ${prStatus(run)}
+    ${aiReviewStatus(run)}
     ${resumeCommand(run)}
     ${runActions(run)}
     ${logLinks(run)}

@@ -190,7 +190,25 @@
     .pr-status-pending { border-color: #f7c46c; color: var(--warn); }
     .pr-status-success { border-color: #8fd0ad; color: var(--good); }
     .pr-status-failure { border-color: #f4b7b0; color: var(--bad); }
+    .pr-status-no_ci { color: var(--muted); }
     .pr-status-unknown { color: var(--muted); }
+    .ai-review-status {
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+      margin-top: 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 3px 6px;
+      font-size: 12px;
+      background: #fff;
+    }
+    .ai-review-status-running { border-color: #f7c46c; color: var(--warn); }
+    .ai-review-status-approved { border-color: #8fd0ad; color: var(--good); }
+    .ai-review-status-changes_requested,
+    .ai-review-status-blocked { border-color: #f4b7b0; color: var(--bad); }
+    .ai-review-status-unknown { color: var(--muted); }
     .event.error { border-color: #f4b7b0; }
     .event.warning { border-color: #f7c46c; }
     .log-links {
