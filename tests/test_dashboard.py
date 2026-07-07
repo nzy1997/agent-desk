@@ -227,7 +227,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(
             payload["projects"][0]["settings"],
             {
-                "auto_start_ready": False,
+                "auto_start_ready": True,
                 "max_concurrent_runs": 2,
                 "requires_human_review": True,
                 "single_closeout_per_workspace": True,

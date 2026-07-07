@@ -72,7 +72,7 @@ class SchedulerSettings:
         worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
     ) -> "SchedulerSettings":
         return cls(
-            auto_start_ready=False,
+            auto_start_ready=repo.auto_start_ready,
             max_concurrent_runs=max(1, repo.max_concurrent_runs),
             requires_human_review=repo.requires_human_review,
             single_closeout_per_workspace=repo.single_closeout_per_workspace,

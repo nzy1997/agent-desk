@@ -1252,7 +1252,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(settings["requires_human_review"])
         self.assertEqual(settings["worker_timeout_seconds"], 28800)
 
-    def test_workspace_settings_reset_auto_start_to_false_on_scheduler_start(self):
+    def test_workspace_settings_load_repo_auto_start_on_scheduler_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             store = Store(root / "desk.sqlite")
@@ -1275,7 +1275,7 @@ class SchedulerTests(unittest.TestCase):
 
             settings = scheduler.settings_payload(root / "one")
 
-        self.assertFalse(settings["auto_start_ready"])
+        self.assertTrue(settings["auto_start_ready"])
         self.assertEqual(settings["max_concurrent_runs"], 4)
         self.assertFalse(settings["requires_human_review"])
 
