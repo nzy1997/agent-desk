@@ -57,6 +57,25 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(run["ci_fix_attempts"], 2)
         self.assertEqual(run["ci_fix_last_sha"], "abc123")
 
+    def test_new_records_include_ai_review_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=1,
+                issue_title="Title",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["ai_review_status"], "")
+        self.assertEqual(run["ai_review_summary"], "")
+        self.assertEqual(run["ai_review_feedback"], "")
+        self.assertEqual(run["ai_review_checked_at"], "")
+        self.assertEqual(run["ai_review_head_sha"], "")
+
     def test_interrupted_is_terminal_and_counted(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "desk.sqlite")
