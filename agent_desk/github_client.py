@@ -169,6 +169,14 @@ class GitHubClient:
                 checks=[],
             )
         checks = normalize_checks(raw_checks)
+        if has_invalid_check_entry(raw_checks):
+            summary = "Invalid PR checks JSON entry" if checks else "No valid PR checks reported"
+            return PullRequestChecksStatus(
+                state="unknown",
+                summary=summary,
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
         if not checks:
             return PullRequestChecksStatus(
                 state="unknown",
@@ -244,6 +252,15 @@ def normalize_checks(raw_checks: Any) -> list[dict[str, Any]]:
             }
         )
     return checks
+
+
+def has_invalid_check_entry(raw_checks: list[Any]) -> bool:
+    for item in raw_checks:
+        if not isinstance(item, dict):
+            return True
+        if not str(item.get("state") or "") and not str(item.get("bucket") or ""):
+            return True
+    return False
 
 
 def pr_has_merge_conflict(pr_view: PullRequestViewStatus) -> bool:

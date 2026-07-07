@@ -260,6 +260,27 @@ class GitHubClientTests(unittest.TestCase):
         self.assertEqual(status.state, "unknown")
         self.assertEqual(status.summary, "1 unknown")
 
+    def test_pr_checks_status_reports_unknown_for_mixed_valid_and_invalid_check_entries(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(
+                    ["gh", "pr", "checks"],
+                    0,
+                    '[{"name":"unit","state":"SUCCESS"},{"name":"mystery"}]',
+                    "",
+                ),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/17",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "Invalid PR checks JSON entry")
+        self.assertEqual(status.checks, [])
+
 
 if __name__ == "__main__":
     unittest.main()
