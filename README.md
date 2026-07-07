@@ -105,6 +105,7 @@ test_command = "python -m unittest"
 auto_start_ready = false
 max_concurrent_runs = 1
 requires_human_review = true
+enable_ai_review = false
 
 [[repos]]
 name = "OWNER/SECOND"
@@ -114,6 +115,7 @@ test_command = "julia --project=. -e 'using Pkg; Pkg.test()'"
 auto_start_ready = false
 max_concurrent_runs = 1
 requires_human_review = true
+enable_ai_review = false
 ```
 
 Run settings are workspace-specific. Each repository folder defaults to manual
@@ -123,6 +125,7 @@ start, one active worker, and human review before closeout:
 auto_start_ready = false
 max_concurrent_runs = 1
 requires_human_review = true
+enable_ai_review = false
 single_closeout_per_workspace = true
 ```
 
@@ -203,6 +206,15 @@ For a run in `pr_open`, the dashboard exposes two Codex-resume actions:
   thread. Codex checks PR status, refuses to merge if checks are pending or
   failing, merges when safe, syncs local state, cleans up the worktree, closes
   or updates the completed issue.
+
+When human review is disabled, Agent Desk treats `CI passed` and `No CI` as
+closeout-ready PR gates. `No CI` means GitHub explicitly reported no checks for
+the PR; `CI unknown` still means Agent Desk could not determine the status and
+will not close out automatically. If `AI review before closeout` is enabled for
+the workspace, Agent Desk runs an independent Codex review worker before
+automatic closeout. Passing AI reviews proceed to closeout; requested changes
+are sent back to the original Codex thread through the existing request-changes
+flow.
 
 Agent Desk records the continuation logs on the same run. Closeout does not
 inspect or modify follow-up issue labels. Local dependency metadata determines

@@ -63,8 +63,10 @@ JSON file lives on disk. Layers (each its own module, wired together in `cli.py`
   (`serve_forever` → `poll_once` → `auto_start_ready_runs` + `monitor_prs`), and starts
   workers in daemon threads. `sync_repo_issues` is the **only** GitHub read for intake;
   `mark_issue_ready` is a pure on-disk move (`available/ → ready/`) with no GitHub call.
-  `monitor_prs` polls open PRs and drives auto-CI-fix (up to `MAX_CI_FIX_ATTEMPTS=3`)
-  and auto-closeout when human review is disabled.
+  `monitor_prs` polls open PRs, records `success`/`pending`/`failure`/`no_ci`/`unknown`,
+  drives auto-CI-fix (up to `MAX_CI_FIX_ATTEMPTS=3`), optionally gates automatic
+  closeout through an independent AI review worker, and auto-closes out when
+  human review is disabled.
 
 - **`worker.py` — one issue → one Codex run.** Creates the worktree
   (`git worktree add -b <branch> origin/<base>`), renders the prompt, runs `codex exec
@@ -79,6 +81,12 @@ JSON file lives on disk. Layers (each its own module, wired together in `cli.py`
   `thread_id` from `stdout.jsonl` and resumes the same thread for `open_pull_request`,
   `request_changes`, `approve_finish`, `finish_after_ci_success`, and `fix_ci`. The
   closeout sandbox is `repo.closeout_sandbox` (`workspace-write` by default).
+
+- **`ai_review.py` - independent PR review worker.** Runs a fresh `codex exec`
+  reviewer prompt against the PR worktree, never resumes the implementation
+  thread, and records `ai_review_*` fields on the run. Approved reviews let the
+  scheduler continue to automatic closeout; requested changes are sent back to
+  the original thread through `request_changes`.
 
 - **`prompt.py`** renders the fixed worker prompt (Superpowers-to-PR protocol, Standing
   Answer Policy). Branches on `repo.push_pr` for the "create a PR" vs "keep branch" path.
