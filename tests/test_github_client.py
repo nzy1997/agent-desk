@@ -127,6 +127,60 @@ class GitHubClientTests(unittest.TestCase):
             PullRequestChecksStatus(state="unknown", summary="No pull request URL", head_sha="", checks=[]),
         )
 
+    def test_pr_checks_status_reports_no_ci_for_empty_checks_json(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 0, "[]", ""),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/9",
+            )
+
+        self.assertEqual(status.state, "no_ci")
+        self.assertEqual(status.summary, "No checks reported")
+        self.assertEqual(status.head_sha, "abc123")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_reports_no_ci_for_gh_no_checks_message(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"def456"}', ""),
+                subprocess.CompletedProcess(
+                    ["gh", "pr", "checks"],
+                    1,
+                    "",
+                    "no checks reported on the 'agent/issue-44' branch",
+                ),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/10",
+            )
+
+        self.assertEqual(status.state, "no_ci")
+        self.assertEqual(status.summary, "no checks reported on the 'agent/issue-44' branch")
+        self.assertEqual(status.head_sha, "def456")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_keeps_ambiguous_empty_output_unknown(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 1, "", "GraphQL: timeout"),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/11",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "GraphQL: timeout")
+
 
 if __name__ == "__main__":
     unittest.main()

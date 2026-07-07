@@ -141,6 +141,13 @@ class GitHubClient:
         )
         if not completed.stdout.strip():
             detail = completed.stderr.strip() or "No checks reported"
+            if no_checks_reported(detail):
+                return PullRequestChecksStatus(
+                    state="no_ci",
+                    summary=detail,
+                    head_sha=pr_view.head_sha,
+                    checks=[],
+                )
             return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=pr_view.head_sha, checks=[])
         try:
             raw_checks = json.loads(completed.stdout)
@@ -222,7 +229,7 @@ def pr_has_merge_conflict(pr_view: PullRequestViewStatus) -> bool:
 
 def summarize_checks(checks: list[dict[str, Any]]) -> tuple[str, str]:
     if not checks:
-        return "unknown", "No checks reported"
+        return "no_ci", "No checks reported"
     failed = sum(1 for check in checks if check_failed(check))
     pending = sum(1 for check in checks if check_pending(check))
     passed = sum(1 for check in checks if check_passed(check))
@@ -256,6 +263,19 @@ def check_failed(check: dict[str, Any]) -> bool:
         "ACTION_REQUIRED",
         "STARTUP_FAILURE",
     }
+
+
+def no_checks_reported(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "no checks reported",
+            "no checks were reported",
+            "no checks found",
+            "no check runs found",
+        )
+    )
 
 
 def check_pending(check: dict[str, Any]) -> bool:
