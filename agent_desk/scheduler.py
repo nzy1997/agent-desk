@@ -11,6 +11,7 @@ import threading
 from typing import Any, Callable
 
 from .config import DEFAULT_WORKER_TIMEOUT_SECONDS, AgentDeskConfig, RepoConfig
+from .ai_review import AIReviewRunner
 from .continuation import ContinuationRunner
 from .dependencies import Dependency, DependencyGraph, parse_dependency_result, render_dependency_prompt
 from .github_client import GitHubClient
@@ -35,13 +36,14 @@ JOB_KIND_BY_TARGET = {
     "_run_request_changes": "request-changes",
     "_run_approve_finish": "approve-finish",
     "_run_auto_finish": "auto-finish",
+    "_run_ai_review": "ai-review",
     "_run_ci_fix": "ci-fix",
     "_run_resume_interrupted": "resume-interrupted",
 }
 CLOSEOUT_STAGES = {
     "approve-finish queued",
     "approve-finish",
-    "auto-finishing after ci success",
+    "auto-finishing after pr gate ready",
     "auto-finish",
 }
 ISSUE_REFERENCE_RE = re.compile(r"(?<![\w/#])#(\d+)\b")
@@ -100,6 +102,7 @@ class Scheduler:
         github: GitHubClient | None = None,
         worker: Worker | None = None,
         continuation_factory: Callable[[AgentDeskConfig, Store], ContinuationRunner] | None = None,
+        ai_review_factory: Callable[[AgentDeskConfig, Store], AIReviewRunner] | None = None,
         dependency_extractor: Callable[[str, list[dict[str, Any]]], DependencyGraph] | None = None,
         config_path: Path | None = None,
         detach_jobs: bool = False,
@@ -109,6 +112,7 @@ class Scheduler:
         self.github = github or GitHubClient()
         self.worker = worker or Worker(config, store)
         self.continuation_factory = continuation_factory or (lambda config, store: ContinuationRunner(config, store))
+        self.ai_review_factory = ai_review_factory or (lambda config, store: AIReviewRunner(config, store))
         self.dependency_runner = getattr(self.worker, "runner", CommandRunner())
         self.dependency_extractor = dependency_extractor or self._extract_dependencies_with_codex
         # When True (server + run-job child), jobs run as detached processes so a
@@ -1334,6 +1338,10 @@ class Scheduler:
             self._run_approve_finish(run_id=run_id)
         elif kind == "auto-finish":
             self._run_auto_finish(run_id=run_id)
+        elif kind == "ai-review":
+            repo = self._repo_for_run(run)
+            pr_status = self.github.pr_checks_status(repo.name, str(run["pr_url"]))
+            self._run_ai_review(run_id=run_id, pr_status=pr_status)
         elif kind == "ci-fix":
             repo = self._repo_for_run(run)
             pr_status = self.github.pr_checks_status(repo.name, str(run["pr_url"]))
@@ -1531,14 +1539,34 @@ class Scheduler:
                 )
                 if pr_status.state == "failure":
                     results.append(self._handle_failed_ci(run, pr_status))
-                elif pr_status.state == "success" and not self._settings_for_repo(repo).requires_human_review:
-                    results.append(self._handle_successful_ci_without_review(run, pr_status))
+                elif pr_status.state in {"success", "no_ci"} and not self._settings_for_repo(
+                    repo
+                ).requires_human_review:
+                    results.append(self._handle_closeout_ready_pr(run, pr_status))
         return results
 
-    def _handle_successful_ci_without_review(
+    def _handle_closeout_ready_pr(
         self,
         run: dict,
         pr_status: PullRequestChecksStatus,
+    ) -> RunNextResult:
+        repo = self._repo_for_run(run)
+        settings = self._settings_for_repo(repo)
+        if settings.enable_ai_review:
+            if (
+                str(run.get("ai_review_status") or "") == "approved"
+                and str(run.get("ai_review_head_sha") or "") == pr_status.head_sha
+            ):
+                return self._start_auto_finish(run, pr_status, source="ai-review")
+            return self._handle_ai_review(run, pr_status)
+        return self._start_auto_finish(run, pr_status, source="pr-gate")
+
+    def _start_auto_finish(
+        self,
+        run: dict,
+        pr_status: PullRequestChecksStatus,
+        *,
+        source: str,
     ) -> RunNextResult:
         run_id = int(run["id"])
         repo = self._repo_for_run(run)
@@ -1546,16 +1574,35 @@ class Scheduler:
             conflict = self._closeout_in_progress(repo, exclude_run_id=run_id)
             if conflict:
                 return self._block_closeout_for_workspace(run_id, repo, conflict)
-        self.store.update_run(run_id, state="running", stage="auto-finishing after ci success", last_error="")
+        self.store.update_run(run_id, state="running", stage="auto-finishing after pr gate ready", last_error="")
         self.store.add_event(
             run_id,
             "info",
             "auto-finish",
-            "CI passed and human review is disabled; starting closeout",
-            {"summary": pr_status.summary, "checks": pr_status.checks, "head_sha": pr_status.head_sha},
+            "PR gate is ready and human review is disabled; starting closeout",
+            {
+                "summary": pr_status.summary,
+                "checks": pr_status.checks,
+                "head_sha": pr_status.head_sha,
+                "state": pr_status.state,
+                "source": source,
+            },
         )
         self._start_daemon_thread(self._run_auto_finish, {"run_id": run_id})
-        return RunNextResult(True, "Started automatic closeout after successful CI", run_id)
+        return RunNextResult(True, "Started automatic closeout after PR gate ready", run_id)
+
+    def _handle_ai_review(self, run: dict, pr_status: PullRequestChecksStatus) -> RunNextResult:
+        run_id = int(run["id"])
+        self.store.update_run(run_id, state="running", stage="ai-review queued", last_error="")
+        self.store.add_event(
+            run_id,
+            "info",
+            "ai-review",
+            "PR gate is ready; starting AI review",
+            {"summary": pr_status.summary, "state": pr_status.state, "head_sha": pr_status.head_sha},
+        )
+        self._start_daemon_thread(self._run_ai_review, {"run_id": run_id, "pr_status": pr_status})
+        return RunNextResult(True, "Started AI review", run_id)
 
     def _handle_failed_ci(self, run: dict, pr_status: PullRequestChecksStatus) -> RunNextResult:
         run_id = int(run["id"])
@@ -1610,9 +1657,15 @@ class Scheduler:
                 self.store.update_run(run_id, state="blocked", stage="blocked", last_error=message)
                 self.store.add_event(run_id, "error", "request-changes", message, {})
                 return
-            self.continuation_factory(self._config_for_run_id(run_id), self.store).request_changes(
+            result = self.continuation_factory(self._config_for_run_id(run_id), self.store).request_changes(
                 run_id, str(feedback)
             )
+            run = self.store.get_run(run_id)
+            if getattr(result, "ok", True) and run["state"] == "running" and str(run.get("stage") or "") in {
+                "request-changes queued",
+                "request-changes",
+            }:
+                self.store.update_run(run_id, state="pr_open", stage="changes addressed", last_error="")
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "request-changes", "Request changes failed", {"detail": str(exc)})
@@ -1652,6 +1705,42 @@ class Scheduler:
         except Exception as exc:
             self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
             self.store.add_event(run_id, "error", "auto-finish", "Automatic closeout failed", {"detail": str(exc)})
+
+    def _run_ai_review(self, *, run_id: int, pr_status: PullRequestChecksStatus) -> None:
+        try:
+            result = self.ai_review_factory(self._config_for_run_id(run_id), self.store).review(
+                run_id,
+                pr_status,
+            )
+            if result.status == "approved":
+                self._start_auto_finish(self.store.get_run(run_id), pr_status, source="ai-review")
+                return
+            if result.status == "changes_requested":
+                run = self.store.get_run(run_id)
+                feedback = str(run.get("ai_review_feedback") or "").strip()
+                if not feedback:
+                    message = "AI review requested changes without feedback"
+                    self.store.update_run(run_id, state="blocked", stage="ai-review blocked", last_error=message)
+                    self.store.add_event(run_id, "error", "ai-review", message, {})
+                    return
+                request_result = self.request_changes(run_id, feedback)
+                if not request_result.started:
+                    self.store.update_run(
+                        run_id,
+                        state="blocked",
+                        stage="ai-review blocked",
+                        last_error=request_result.message,
+                    )
+                    self.store.add_event(
+                        run_id,
+                        "error",
+                        "ai-review",
+                        "Could not dispatch AI review feedback",
+                        {"detail": request_result.message},
+                    )
+        except Exception as exc:
+            self.store.update_run(run_id, state="failed", stage="failed", last_error=str(exc))
+            self.store.add_event(run_id, "error", "ai-review", "AI review failed", {"detail": str(exc)})
 
     def _start_ci_fix_if_closeout_blocked_by_failed_checks(self, run_id: int, result) -> None:
         if getattr(result, "ok", True):

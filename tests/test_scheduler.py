@@ -171,6 +171,68 @@ class FakeContinuationRunner:
         self.calls.append(("finish_after_ci_success", run_id))
 
 
+class FakeAIReviewRunner:
+    def __init__(self, store, status="approved", message="review ok", feedback=""):
+        self.store = store
+        self.status = status
+        self.message = message
+        self.feedback = feedback
+        self.calls = []
+
+    def review(self, run_id, pr_status):
+        self.calls.append((run_id, pr_status))
+        if self.status == "approved":
+            self.store.update_run(
+                run_id,
+                state="pr_open",
+                stage="ai-review approved",
+                ai_review_status="approved",
+                ai_review_summary=self.message,
+                ai_review_head_sha=pr_status.head_sha,
+                last_error="",
+            )
+            return type(
+                "Result",
+                (),
+                {"ok": True, "status": "approved", "message": self.message, "run_id": run_id},
+            )()
+        if self.status == "changes_requested":
+            self.store.update_run(
+                run_id,
+                state="pr_open",
+                stage="ai-review changes requested",
+                ai_review_status="changes_requested",
+                ai_review_summary=self.message,
+                ai_review_feedback=self.feedback,
+                ai_review_head_sha=pr_status.head_sha,
+                last_error="",
+            )
+            return type(
+                "Result",
+                (),
+                {
+                    "ok": True,
+                    "status": "changes_requested",
+                    "message": self.message,
+                    "run_id": run_id,
+                },
+            )()
+        self.store.update_run(
+            run_id,
+            state="blocked",
+            stage="ai-review blocked",
+            ai_review_status="blocked",
+            ai_review_summary=self.message,
+            ai_review_head_sha=pr_status.head_sha,
+            last_error=self.message,
+        )
+        return type(
+            "Result",
+            (),
+            {"ok": False, "status": "blocked", "message": self.message, "run_id": run_id},
+        )()
+
+
 class FakePullRequestGitHub(FakeGitHub):
     def __init__(self, pr_status):
         super().__init__()
@@ -1449,8 +1511,192 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(run["pr_ci_status"], "success")
         self.assertEqual(run["state"], "running")
-        self.assertEqual(run["stage"], "auto-finishing after ci success")
+        self.assertEqual(run["stage"], "auto-finishing after pr gate ready")
         self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
+
+    def test_monitor_prs_auto_finishes_no_ci_when_human_review_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="no_ci",
+                summary="No checks reported",
+                head_sha="abc123",
+                checks=[],
+            )
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+            )
+            scheduler.update_settings(workspace_path=root / "one", requires_human_review=False)
+
+            scheduler.monitor_prs()
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["pr_ci_status"], "no_ci")
+        self.assertEqual(run["state"], "running")
+        self.assertEqual(run["stage"], "auto-finishing after pr gate ready")
+        self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
+
+    def test_monitor_prs_starts_ai_review_when_enabled_after_successful_ci(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            ai_review = FakeAIReviewRunner(store, status="approved", message="review approved")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                requires_human_review=False,
+                enable_ai_review=True,
+            )
+
+            scheduler.monitor_prs()
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["stage"], "auto-finishing after pr gate ready")
+        self.assertEqual(ai_review.calls, [(run_id, pr_status)])
+        self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
+
+    def test_ai_review_changes_requested_dispatches_request_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="no_ci",
+                summary="No checks reported",
+                head_sha="abc123",
+                checks=[],
+            )
+            ai_review = FakeAIReviewRunner(
+                store,
+                status="changes_requested",
+                message="needs regression",
+                feedback="Please add a regression test for escaped commas.",
+            )
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=pr_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(ai_review.calls, [(run_id, pr_status)])
+        self.assertEqual(
+            continuation.calls,
+            [("request_changes", run_id, "Please add a regression test for escaped commas.")],
+        )
+        self.assertEqual(run["stage"], "changes addressed")
+
+    def test_ai_review_blocked_leaves_run_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+            )
+            pr_status = PullRequestChecksStatus(
+                state="success", summary="1 passed", head_sha="abc123", checks=[]
+            )
+            ai_review = FakeAIReviewRunner(store, status="blocked", message="could not inspect diff")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=pr_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["state"], "blocked")
+        self.assertEqual(run["stage"], "ai-review blocked")
+        self.assertEqual(continuation.calls, [])
 
     def test_auto_finish_blocked_by_late_failing_checks_starts_auto_fix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1860,6 +2106,33 @@ class DetachedJobTests(unittest.TestCase):
                 )
                 scheduler.run_job(run_id, kind)
                 self.assertEqual(continuation.calls, [(expected, run_id)])
+
+    def test_run_job_ai_review_refetches_pr_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            pr_status = PullRequestChecksStatus(state="success", summary="ok", checks=[], head_sha="abc")
+            github = FakePullRequestGitHub(pr_status)
+            ai_review = FakeAIReviewRunner(store, status="blocked", message="stop after review")
+            scheduler = Scheduler(
+                self._config(root),
+                store,
+                github=github,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="T",
+                issue_url="u8",
+                branch_name="agent/issue-8",
+            )
+            store.update_run(run_id, pr_url="https://example.test/pr/8")
+
+            scheduler.run_job(run_id, "ai-review")
+
+        self.assertEqual(github.pr_status_calls, [("octo/one", "https://example.test/pr/8")])
+        self.assertEqual(ai_review.calls, [(run_id, pr_status)])
 
     def test_spawn_detached_job_requires_config_path(self):
         with tempfile.TemporaryDirectory() as tmp:
