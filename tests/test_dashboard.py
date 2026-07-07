@@ -230,6 +230,7 @@ class DashboardTests(unittest.TestCase):
                 "auto_start_ready": True,
                 "max_concurrent_runs": 2,
                 "requires_human_review": True,
+                "enable_ai_review": False,
                 "single_closeout_per_workspace": True,
                 "worker_timeout_seconds": 28800,
             },
@@ -566,6 +567,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("worker-timeout-hours", HTML)
         self.assertIn("worker_timeout_seconds", HTML)
         self.assertIn("requires-human-review", HTML)
+        self.assertIn("enable-ai-review", HTML)
+        self.assertIn("enable_ai_review", HTML)
         self.assertIn("single-closeout-per-workspace", HTML)
         self.assertIn("saveSettings()", HTML)
 

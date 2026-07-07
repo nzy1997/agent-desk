@@ -1235,6 +1235,24 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(settings["worker_timeout_seconds"], 28800)
         self.assertEqual(updated["worker_timeout_seconds"], 14400)
 
+    def test_update_settings_toggles_ai_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+
+            updated = scheduler.update_settings(workspace_path=root / "one", enable_ai_review=True)
+
+        self.assertTrue(updated["enable_ai_review"])
+        self.assertTrue(scheduler.settings_payload(root / "one")["enable_ai_review"])
+
     def test_workspace_settings_default_to_manual_single_worker_with_human_review(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1250,6 +1268,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(settings["auto_start_ready"])
         self.assertEqual(settings["max_concurrent_runs"], 1)
         self.assertTrue(settings["requires_human_review"])
+        self.assertFalse(settings["enable_ai_review"])
         self.assertEqual(settings["worker_timeout_seconds"], 28800)
 
     def test_workspace_settings_load_repo_auto_start_on_scheduler_start(self):
@@ -1266,6 +1285,7 @@ class SchedulerTests(unittest.TestCase):
                             auto_start_ready=True,
                             max_concurrent_runs=4,
                             requires_human_review=False,
+                            enable_ai_review=True,
                         )
                     ],
                 ),
@@ -1278,6 +1298,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(settings["auto_start_ready"])
         self.assertEqual(settings["max_concurrent_runs"], 4)
         self.assertFalse(settings["requires_human_review"])
+        self.assertTrue(settings["enable_ai_review"])
 
     def test_poll_once_auto_starts_ready_runs_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:

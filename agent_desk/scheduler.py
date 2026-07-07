@@ -61,6 +61,7 @@ class SchedulerSettings:
     auto_start_ready: bool = False
     max_concurrent_runs: int = 1
     requires_human_review: bool = True
+    enable_ai_review: bool = False
     single_closeout_per_workspace: bool = True
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS
 
@@ -75,6 +76,7 @@ class SchedulerSettings:
             auto_start_ready=repo.auto_start_ready,
             max_concurrent_runs=max(1, repo.max_concurrent_runs),
             requires_human_review=repo.requires_human_review,
+            enable_ai_review=repo.enable_ai_review,
             single_closeout_per_workspace=repo.single_closeout_per_workspace,
             worker_timeout_seconds=max(60, int(worker_timeout_seconds)),
         )
@@ -84,6 +86,7 @@ class SchedulerSettings:
             "auto_start_ready": self.auto_start_ready,
             "max_concurrent_runs": self.max_concurrent_runs,
             "requires_human_review": self.requires_human_review,
+            "enable_ai_review": self.enable_ai_review,
             "single_closeout_per_workspace": self.single_closeout_per_workspace,
             "worker_timeout_seconds": self.worker_timeout_seconds,
         }
@@ -275,6 +278,7 @@ class Scheduler:
         auto_start_ready: bool | None = None,
         max_concurrent_runs: int | None = None,
         requires_human_review: bool | None = None,
+        enable_ai_review: bool | None = None,
         single_closeout_per_workspace: bool | None = None,
         worker_timeout_seconds: int | None = None,
     ) -> dict[str, bool | int]:
@@ -292,6 +296,8 @@ class Scheduler:
                 settings.max_concurrent_runs = value
             if requires_human_review is not None:
                 settings.requires_human_review = bool(requires_human_review)
+            if enable_ai_review is not None:
+                settings.enable_ai_review = bool(enable_ai_review)
             if single_closeout_per_workspace is not None:
                 settings.single_closeout_per_workspace = bool(single_closeout_per_workspace)
             if worker_timeout_seconds is not None:

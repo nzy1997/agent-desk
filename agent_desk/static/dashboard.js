@@ -430,6 +430,7 @@ function settingsControls() {
     document.getElementById('max-concurrent-runs'),
     document.getElementById('worker-timeout-hours'),
     document.getElementById('requires-human-review'),
+    document.getElementById('enable-ai-review'),
     document.getElementById('single-closeout-per-workspace'),
     document.getElementById('settings-save')
   ];
@@ -454,6 +455,7 @@ function renderSettings(state) {
     auto_start_ready: false,
     max_concurrent_runs: 1,
     requires_human_review: true,
+    enable_ai_review: false,
     single_closeout_per_workspace: true,
     worker_timeout_seconds: 28800
   };
@@ -465,6 +467,7 @@ function renderSettings(state) {
     ? String(timeoutHours)
     : String(Math.round(timeoutHours * 100) / 100);
   document.getElementById('requires-human-review').checked = settings.requires_human_review !== false;
+  document.getElementById('enable-ai-review').checked = !!settings.enable_ai_review;
   document.getElementById('single-closeout-per-workspace').checked = settings.single_closeout_per_workspace !== false;
   document.getElementById('settings-status').textContent = project ? `Settings for ${project.name}` : 'Select a folder';
 }
@@ -490,6 +493,7 @@ async function saveSettings() {
       max_concurrent_runs: max,
       worker_timeout_seconds: timeoutSeconds,
       requires_human_review: document.getElementById('requires-human-review').checked,
+      enable_ai_review: document.getElementById('enable-ai-review').checked,
       single_closeout_per_workspace: document.getElementById('single-closeout-per-workspace').checked
     });
     document.getElementById('settings-status').textContent = 'Saved';

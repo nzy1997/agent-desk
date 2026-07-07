@@ -511,6 +511,9 @@ def make_handler(
                         requires_human_review=payload.get("requires_human_review")
                         if "requires_human_review" in payload
                         else None,
+                        enable_ai_review=payload.get("enable_ai_review")
+                        if "enable_ai_review" in payload
+                        else None,
                         single_closeout_per_workspace=payload.get(
                             "single_closeout_per_workspace"
                         )
