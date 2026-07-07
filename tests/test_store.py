@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from agent_desk.store import Store
@@ -67,6 +68,37 @@ class StoreTests(unittest.TestCase):
                 issue_url="https://example.test/1",
                 branch_name="agent/issue-1",
             )
+
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["ai_review_status"], "")
+        self.assertEqual(run["ai_review_summary"], "")
+        self.assertEqual(run["ai_review_feedback"], "")
+        self.assertEqual(run["ai_review_checked_at"], "")
+        self.assertEqual(run["ai_review_head_sha"], "")
+
+    def test_legacy_records_default_missing_ai_review_fields_on_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            store = Store(base / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=1,
+                issue_title="Title",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1",
+            )
+            record_path = base / "state" / "octo__example" / "queued" / f"{run_id}.json"
+            payload = json.loads(record_path.read_text(encoding="utf-8"))
+            for key in (
+                "ai_review_status",
+                "ai_review_summary",
+                "ai_review_feedback",
+                "ai_review_checked_at",
+                "ai_review_head_sha",
+            ):
+                payload.pop(key, None)
+            record_path.write_text(json.dumps(payload), encoding="utf-8")
 
             run = store.get_run(run_id)
 

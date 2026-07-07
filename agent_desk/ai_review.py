@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -91,12 +92,12 @@ class AIReviewRunner:
             elif completed.timeout_reason == "timeout":
                 message = "AI review timeout"
             return self._block(run_id, message, {"detail": completed.stderr[-4000:]})
-        if not result_path.exists() and completed.stdout.strip():
-            result_path.write_text(completed.stdout, encoding="utf-8")
         try:
             payload = parse_ai_review_result(result_path, completed.stdout)
         except ValueError as exc:
             return self._block(run_id, str(exc))
+        if not result_path.exists():
+            result_path.write_text(json.dumps(payload.__dict__), encoding="utf-8")
         return self._record_payload(run_id, payload, pr_status)
 
     def _record_payload(

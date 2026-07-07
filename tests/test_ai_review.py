@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from agent_desk.ai_review import AIReviewRunner, parse_ai_review_result, render_ai_review_prompt
@@ -130,6 +131,36 @@ class AIReviewTests(unittest.TestCase):
             self.assertEqual(run["ai_review_head_sha"], "abc123")
             self.assertTrue((run_dir / "ai-review-prompt.md").exists())
             self.assertTrue((run_dir / "ai-review-result.json").exists())
+
+    def test_review_jsonl_stdout_fallback_writes_only_final_review_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, _worktree, run_dir = self._config_store_run(root)
+            pr_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            stdout = "\n".join(
+                [
+                    '{"type":"thread.started","thread_id":"thread-1"}',
+                    '{"type":"token.delta","delta":"thinking"}',
+                    '{"status":"approved","summary":"Looks good","findings":[],"feedback":"","risks":[],"pr_url":"https://github.com/octo/example/pull/9"}',
+                ]
+            )
+            runner = FakeCommandRunner([CommandResult(["codex", "exec"], 0, stdout, "")])
+
+            result = AIReviewRunner(config, store, runner=runner).review(run_id, pr_status)
+            payload = json.loads((run_dir / "ai-review-result.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual(payload["summary"], "Looks good")
+        self.assertEqual(payload["findings"], [])
+        self.assertEqual(payload["feedback"], "")
+        self.assertEqual(payload["risks"], [])
+        self.assertEqual(payload["pr_url"], "https://github.com/octo/example/pull/9")
 
     def test_review_changes_requested_requires_feedback(self):
         with tempfile.TemporaryDirectory() as tmp:
