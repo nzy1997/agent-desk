@@ -155,11 +155,15 @@ class RecordingDependencyExtractor:
 
 
 class FakeContinuationRunner:
-    def __init__(self):
+    def __init__(self, store=None):
+        self.store = store
         self.calls = []
 
     def request_changes(self, run_id, feedback):
         self.calls.append(("request_changes", run_id, feedback))
+        if self.store is not None:
+            self.store.update_run(run_id, state="pr_open", stage="changes addressed", last_error="")
+        return ContinuationResult(True, "changes addressed", run_id)
 
     def approve_finish(self, run_id):
         self.calls.append(("approve_finish", run_id))
@@ -169,6 +173,69 @@ class FakeContinuationRunner:
 
     def finish_after_ci_success(self, run_id):
         self.calls.append(("finish_after_ci_success", run_id))
+        return ContinuationResult(True, "finished", run_id)
+
+
+class FakeAIReviewRunner:
+    def __init__(self, store, status="approved", message="review ok", feedback=""):
+        self.store = store
+        self.status = status
+        self.message = message
+        self.feedback = feedback
+        self.calls = []
+
+    def review(self, run_id, pr_status):
+        self.calls.append((run_id, pr_status))
+        if self.status == "approved":
+            self.store.update_run(
+                run_id,
+                state="pr_open",
+                stage="ai-review approved",
+                ai_review_status="approved",
+                ai_review_summary=self.message,
+                ai_review_head_sha=pr_status.head_sha,
+                last_error="",
+            )
+            return type(
+                "Result",
+                (),
+                {"ok": True, "status": "approved", "message": self.message, "run_id": run_id},
+            )()
+        if self.status == "changes_requested":
+            self.store.update_run(
+                run_id,
+                state="pr_open",
+                stage="ai-review changes requested",
+                ai_review_status="changes_requested",
+                ai_review_summary=self.message,
+                ai_review_feedback=self.feedback,
+                ai_review_head_sha=pr_status.head_sha,
+                last_error="",
+            )
+            return type(
+                "Result",
+                (),
+                {
+                    "ok": True,
+                    "status": "changes_requested",
+                    "message": self.message,
+                    "run_id": run_id,
+                },
+            )()
+        self.store.update_run(
+            run_id,
+            state="blocked",
+            stage="ai-review blocked",
+            ai_review_status="blocked",
+            ai_review_summary=self.message,
+            ai_review_head_sha=pr_status.head_sha,
+            last_error=self.message,
+        )
+        return type(
+            "Result",
+            (),
+            {"ok": False, "status": "blocked", "message": self.message, "run_id": run_id},
+        )()
 
 
 class FakePullRequestGitHub(FakeGitHub):
@@ -1235,6 +1302,24 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(settings["worker_timeout_seconds"], 28800)
         self.assertEqual(updated["worker_timeout_seconds"], 14400)
 
+    def test_update_settings_toggles_ai_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+
+            updated = scheduler.update_settings(workspace_path=root / "one", enable_ai_review=True)
+
+        self.assertTrue(updated["enable_ai_review"])
+        self.assertTrue(scheduler.settings_payload(root / "one")["enable_ai_review"])
+
     def test_workspace_settings_default_to_manual_single_worker_with_human_review(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1250,6 +1335,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(settings["auto_start_ready"])
         self.assertEqual(settings["max_concurrent_runs"], 1)
         self.assertTrue(settings["requires_human_review"])
+        self.assertFalse(settings["enable_ai_review"])
         self.assertEqual(settings["worker_timeout_seconds"], 28800)
 
     def test_workspace_settings_load_repo_auto_start_on_scheduler_start(self):
@@ -1266,6 +1352,7 @@ class SchedulerTests(unittest.TestCase):
                             auto_start_ready=True,
                             max_concurrent_runs=4,
                             requires_human_review=False,
+                            enable_ai_review=True,
                         )
                     ],
                 ),
@@ -1278,6 +1365,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(settings["auto_start_ready"])
         self.assertEqual(settings["max_concurrent_runs"], 4)
         self.assertFalse(settings["requires_human_review"])
+        self.assertTrue(settings["enable_ai_review"])
 
     def test_poll_once_auto_starts_ready_runs_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1428,8 +1516,353 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(run["pr_ci_status"], "success")
         self.assertEqual(run["state"], "running")
-        self.assertEqual(run["stage"], "auto-finishing after ci success")
+        self.assertEqual(run["stage"], "auto-finishing after pr gate ready")
         self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
+
+    def test_monitor_prs_auto_finishes_no_ci_when_human_review_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="no_ci",
+                summary="No checks reported",
+                head_sha="abc123",
+                checks=[],
+            )
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+            )
+            scheduler.update_settings(workspace_path=root / "one", requires_human_review=False)
+
+            scheduler.monitor_prs()
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["pr_ci_status"], "no_ci")
+        self.assertEqual(run["state"], "running")
+        self.assertEqual(run["stage"], "auto-finishing after pr gate ready")
+        self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
+
+    def test_monitor_prs_starts_ai_review_when_enabled_after_successful_ci(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            ai_review = FakeAIReviewRunner(store, status="approved", message="review approved")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                requires_human_review=False,
+                enable_ai_review=True,
+            )
+
+            scheduler.monitor_prs()
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["stage"], "auto-finishing after pr gate ready")
+        self.assertEqual(ai_review.calls, [(run_id, pr_status)])
+        self.assertEqual(continuation.calls, [("finish_after_ci_success", run_id)])
+
+    def test_ai_review_approval_rechecks_pr_head_before_auto_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            reviewed_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            current_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="def456",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            github = FakePullRequestGitHub(current_status)
+            ai_review = FakeAIReviewRunner(store, status="approved", message="review approved")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=github,
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=reviewed_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(github.pr_status_calls, [("octo/one", "https://github.com/octo/one/pull/9")])
+        self.assertEqual(run["state"], "pr_open")
+        self.assertEqual(run["stage"], "ai-review stale")
+        self.assertEqual(run["pr_ci_status"], "success")
+        self.assertEqual(run["ai_review_status"], "")
+        self.assertIn("PR head changed", run["last_error"])
+        self.assertEqual(ai_review.calls, [(run_id, reviewed_status)])
+        self.assertEqual(continuation.calls, [])
+
+    def test_ai_review_approval_rechecks_failed_pr_gate_before_auto_finish(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            reviewed_status = PullRequestChecksStatus(
+                state="success",
+                summary="2 passed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "SUCCESS"}],
+            )
+            current_status = PullRequestChecksStatus(
+                state="failure",
+                summary="1 failed",
+                head_sha="abc123",
+                checks=[{"name": "unit", "state": "FAILURE"}],
+            )
+            github = FakePullRequestGitHub(current_status)
+            ai_review = FakeAIReviewRunner(store, status="approved", message="review approved")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=github,
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=reviewed_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(github.pr_status_calls, [("octo/one", "https://github.com/octo/one/pull/9")])
+        self.assertEqual(run["state"], "running")
+        self.assertEqual(run["stage"], "auto-fixing ci (1/3)")
+        self.assertEqual(run["pr_ci_status"], "failure")
+        self.assertEqual(ai_review.calls, [(run_id, reviewed_status)])
+        self.assertEqual(continuation.calls, [(run_id, current_status, 1, 3)])
+
+    def test_ai_review_changes_requested_dispatches_request_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="no_ci",
+                summary="No checks reported",
+                head_sha="abc123",
+                checks=[],
+            )
+            ai_review = FakeAIReviewRunner(
+                store,
+                status="changes_requested",
+                message="needs regression",
+                feedback="Please add a regression test for escaped commas.",
+            )
+            continuation = FakeContinuationRunner(store)
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=pr_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(ai_review.calls, [(run_id, pr_status)])
+        self.assertEqual(
+            continuation.calls,
+            [("request_changes", run_id, "Please add a regression test for escaped commas.")],
+        )
+        self.assertEqual(run["stage"], "changes addressed")
+
+    def test_ai_review_blocked_leaves_run_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+            )
+            pr_status = PullRequestChecksStatus(
+                state="success", summary="1 passed", head_sha="abc123", checks=[]
+            )
+            ai_review = FakeAIReviewRunner(store, status="blocked", message="could not inspect diff")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+
+            scheduler._run_ai_review(run_id=run_id, pr_status=pr_status)
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["state"], "blocked")
+        self.assertEqual(run["stage"], "ai-review blocked")
+        self.assertEqual(continuation.calls, [])
+
+    def test_monitor_prs_unknown_status_is_inert_even_with_ai_review_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=1,
+                issue_title="First",
+                issue_url="https://example.test/1",
+                branch_name="agent/issue-1-first-run-1",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/one/pull/9",
+                codex_thread_id="thread-1",
+                worktree_path=str(root / "worktree"),
+            )
+            pr_status = PullRequestChecksStatus(
+                state="unknown",
+                summary="Checks still pending",
+                head_sha="abc123",
+                checks=[],
+            )
+            ai_review = FakeAIReviewRunner(store, status="approved", message="should not run")
+            continuation = FakeContinuationRunner(store)
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data", repos=[RepoConfig(name="octo/one", local_path=root / "one")]
+                ),
+                store,
+                github=FakePullRequestGitHub(pr_status),
+                continuation_factory=lambda config, store: continuation,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                requires_human_review=False,
+                enable_ai_review=True,
+            )
+
+            scheduler.monitor_prs()
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["state"], "pr_open")
+        self.assertEqual(run["stage"], "pull request opened")
+        self.assertEqual(run["pr_ci_status"], "unknown")
+        self.assertEqual(ai_review.calls, [])
+        self.assertEqual(continuation.calls, [])
 
     def test_auto_finish_blocked_by_late_failing_checks_starts_auto_fix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1815,6 +2248,38 @@ class DetachedJobTests(unittest.TestCase):
 
             self.assertEqual(continuation.calls, [("request_changes", run_id, "please tighten the tests")])
 
+    def test_run_request_changes_does_not_normalize_success_without_store_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            continuation = FakeContinuationRunner()
+            scheduler = NoopScheduler(
+                self._config(root),
+                store,
+                github=FakeGitHub(),
+                continuation_factory=lambda config, store: continuation,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="T",
+                issue_url="u8",
+                branch_name="agent/issue-8",
+            )
+            store.update_run(
+                run_id,
+                state="running",
+                stage="request-changes queued",
+                request_changes_feedback="please tighten the tests",
+            )
+
+            scheduler._run_request_changes(run_id=run_id)
+            run = store.get_run(run_id)
+
+        self.assertEqual(continuation.calls, [("request_changes", run_id, "please tighten the tests")])
+        self.assertEqual(run["state"], "running")
+        self.assertEqual(run["stage"], "request-changes queued")
+
     def test_run_job_closeout_kinds_call_continuation(self):
         for kind, expected in [
             ("approve-finish", "approve_finish"),
@@ -1839,6 +2304,33 @@ class DetachedJobTests(unittest.TestCase):
                 )
                 scheduler.run_job(run_id, kind)
                 self.assertEqual(continuation.calls, [(expected, run_id)])
+
+    def test_run_job_ai_review_refetches_pr_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            pr_status = PullRequestChecksStatus(state="success", summary="ok", checks=[], head_sha="abc")
+            github = FakePullRequestGitHub(pr_status)
+            ai_review = FakeAIReviewRunner(store, status="blocked", message="stop after review")
+            scheduler = Scheduler(
+                self._config(root),
+                store,
+                github=github,
+                ai_review_factory=lambda config, store: ai_review,
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="T",
+                issue_url="u8",
+                branch_name="agent/issue-8",
+            )
+            store.update_run(run_id, pr_url="https://example.test/pr/8")
+
+            scheduler.run_job(run_id, "ai-review")
+
+        self.assertEqual(github.pr_status_calls, [("octo/one", "https://example.test/pr/8")])
+        self.assertEqual(ai_review.calls, [(run_id, pr_status)])
 
     def test_spawn_detached_job_requires_config_path(self):
         with tempfile.TemporaryDirectory() as tmp:

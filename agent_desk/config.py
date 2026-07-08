@@ -26,6 +26,7 @@ class RepoConfig:
     auto_start_ready: bool = False
     max_concurrent_runs: int = 1
     requires_human_review: bool = True
+    enable_ai_review: bool = False
     single_closeout_per_workspace: bool = True
     # Legacy no-op setting accepted from older configs.
     mutate_github: bool = False
@@ -76,6 +77,7 @@ def load_config(path: str | Path) -> AgentDeskConfig:
                 auto_start_ready=bool(repo_raw.get("auto_start_ready", False)),
                 max_concurrent_runs=max(1, int(repo_raw.get("max_concurrent_runs", 1))),
                 requires_human_review=bool(repo_raw.get("requires_human_review", True)),
+                enable_ai_review=bool(repo_raw.get("enable_ai_review", False)),
                 single_closeout_per_workspace=bool(repo_raw.get("single_closeout_per_workspace", True)),
                 mutate_github=bool(repo_raw.get("mutate_github", False)),
                 push_pr=bool(repo_raw.get("push_pr", False)),
@@ -151,6 +153,7 @@ def add_project_to_config(config_path: str | Path, local_path: str | Path, repo_
         auto_start_ready=template.auto_start_ready,
         max_concurrent_runs=template.max_concurrent_runs,
         requires_human_review=template.requires_human_review,
+        enable_ai_review=template.enable_ai_review,
         single_closeout_per_workspace=template.single_closeout_per_workspace,
         push_pr=template.push_pr,
         closeout_sandbox=template.closeout_sandbox,
@@ -222,6 +225,7 @@ def _repo_config_toml(repo: RepoConfig) -> str:
             f"auto_start_ready = {_toml_bool(repo.auto_start_ready)}",
             f"max_concurrent_runs = {repo.max_concurrent_runs}",
             f"requires_human_review = {_toml_bool(repo.requires_human_review)}",
+            f"enable_ai_review = {_toml_bool(repo.enable_ai_review)}",
             f"single_closeout_per_workspace = {_toml_bool(repo.single_closeout_per_workspace)}",
             f"push_pr = {_toml_bool(repo.push_pr)}",
             f"closeout_sandbox = {_toml_string(repo.closeout_sandbox)}",
@@ -248,6 +252,7 @@ test_command = "python -m unittest"
 auto_start_ready = false
 max_concurrent_runs = 1
 requires_human_review = true
+enable_ai_review = false
 single_closeout_per_workspace = true
 
 # Keep PR publishing disabled until you are comfortable with the loop.

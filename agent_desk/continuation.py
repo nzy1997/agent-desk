@@ -406,23 +406,29 @@ Return JSON with status, summary, tests, questions, risks, pr_url, and decision_
 
 
 def render_finish_after_ci_success_prompt(run: dict[str, Any], *, ready_label: str, blocked_label: str) -> str:
-    return f"""Human review is disabled for this Agent Desk pull request, and GitHub CI has passed.
+    gate_status = str(run.get("pr_ci_status") or "unknown")
+    gate_summary = str(run.get("pr_ci_summary") or "No PR gate summary recorded")
+    return f"""Human review is disabled for this Agent Desk pull request, and Agent Desk reports this pull request is eligible for automatic closeout.
 
 Repository: {run['repo_name']}
 Issue: #{run['issue_number']} {run['issue_title']}
 Issue URL: {run['issue_url']}
 Pull request: {run.get('pr_url') or '(missing PR URL)'}
 Branch: {run['branch_name']}
+PR gate status: {gate_status}
+PR gate summary: {gate_summary}
 
 Continue from the existing Codex thread context and perform the closeout workflow:
 1. Inspect the pull request status and checks. Do not merge while checks are pending or failing.
-2. If checks are not all successful, return status "blocked" with the concrete reason.
-3. If checks are successful, merge the PR using the repository's normal merge method.
-4. Sync the local base branch with origin.
-5. Remove the local worktree and prune stale worktree metadata when it is safe.
-6. Close or update the completed issue if GitHub did not do it automatically.
-7. Do not inspect or modify follow-up issue labels during closeout. Agent Desk manages dependency unlocking locally from its dependency graph.
-8. Report exactly which PR, worktree, branch, and completed issue were changed.
+2. If the gate is success, verify there are no pending or failing checks before merging.
+3. If the gate is no_ci, confirm there are no required GitHub checks and the pull request is otherwise mergeable before merging.
+4. If the pull request is not safe to merge, return status "blocked" with the concrete reason.
+5. If the pull request is safe to merge, merge the PR using the repository's normal merge method.
+6. Sync the local base branch with origin.
+7. Remove the local worktree and prune stale worktree metadata when it is safe.
+8. Close or update the completed issue if GitHub did not do it automatically.
+9. Do not inspect or modify follow-up issue labels during closeout. Agent Desk manages dependency unlocking locally from its dependency graph.
+10. Report exactly which PR, worktree, branch, and completed issue were changed.
 
 Return JSON with status, summary, tests, questions, risks, pr_url, and decision_log.
 """

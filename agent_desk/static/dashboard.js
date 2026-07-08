@@ -430,6 +430,7 @@ function settingsControls() {
     document.getElementById('max-concurrent-runs'),
     document.getElementById('worker-timeout-hours'),
     document.getElementById('requires-human-review'),
+    document.getElementById('enable-ai-review'),
     document.getElementById('single-closeout-per-workspace'),
     document.getElementById('settings-save')
   ];
@@ -454,6 +455,7 @@ function renderSettings(state) {
     auto_start_ready: false,
     max_concurrent_runs: 1,
     requires_human_review: true,
+    enable_ai_review: false,
     single_closeout_per_workspace: true,
     worker_timeout_seconds: 28800
   };
@@ -465,6 +467,7 @@ function renderSettings(state) {
     ? String(timeoutHours)
     : String(Math.round(timeoutHours * 100) / 100);
   document.getElementById('requires-human-review').checked = settings.requires_human_review !== false;
+  document.getElementById('enable-ai-review').checked = !!settings.enable_ai_review;
   document.getElementById('single-closeout-per-workspace').checked = settings.single_closeout_per_workspace !== false;
   document.getElementById('settings-status').textContent = project ? `Settings for ${project.name}` : 'Select a folder';
 }
@@ -490,6 +493,7 @@ async function saveSettings() {
       max_concurrent_runs: max,
       worker_timeout_seconds: timeoutSeconds,
       requires_human_review: document.getElementById('requires-human-review').checked,
+      enable_ai_review: document.getElementById('enable-ai-review').checked,
       single_closeout_per_workspace: document.getElementById('single-closeout-per-workspace').checked
     });
     document.getElementById('settings-status').textContent = 'Saved';
@@ -561,6 +565,7 @@ function prStatus(run) {
     pending: 'CI running',
     success: 'CI passed',
     failure: 'CI failed',
+    no_ci: 'No CI',
     unknown: 'CI unknown'
   };
   const summary = run.pr_ci_summary ? ` · ${esc(run.pr_ci_summary)}` : '';
@@ -568,6 +573,20 @@ function prStatus(run) {
   const fixes = attempts ? ` · fixes ${attempts}/3` : '';
   const label = labels[status] || labels.unknown;
   return `<div class="pr-status pr-status-${esc(status)}"><strong>${esc(label)}</strong><span class="muted">${summary}${fixes}</span></div>`;
+}
+function aiReviewStatus(run) {
+  const status = run.ai_review_status || '';
+  const running = String(run.stage || '').startsWith('ai-review') && run.state === 'running';
+  if (!status && !running) return '';
+  const labels = {
+    approved: 'AI review approved',
+    changes_requested: 'AI review changes requested',
+    blocked: 'AI review blocked'
+  };
+  const label = running ? 'AI review running' : (labels[status] || 'AI review');
+  const summary = run.ai_review_summary ? ` · ${esc(run.ai_review_summary)}` : '';
+  const cls = running ? 'running' : esc(status || 'unknown');
+  return `<div class="ai-review-status ai-review-status-${cls}"><strong>${esc(label)}</strong><span class="muted">${summary}</span></div>`;
 }
 function isDependencyWaiting(run) {
   return run.state === 'waiting_dependencies' || (run.state === 'blocked' && run.stage === 'waiting for dependencies');
@@ -630,6 +649,7 @@ function runHtml(run) {
     ${dependencyOverridesHtml(run)}
     ${run.pr_url ? `<div><a href="${esc(run.pr_url)}">Pull request</a></div>` : ''}
     ${prStatus(run)}
+    ${aiReviewStatus(run)}
     ${resumeCommand(run)}
     ${runActions(run)}
     ${logLinks(run)}

@@ -30,6 +30,7 @@ test_command = "python -m unittest"
 auto_start_ready = true
 max_concurrent_runs = 2
 requires_human_review = false
+enable_ai_review = true
 single_closeout_per_workspace = false
 closeout_sandbox = "danger-full-access"
 """.strip(),
@@ -54,6 +55,7 @@ closeout_sandbox = "danger-full-access"
         self.assertTrue(repo.auto_start_ready)
         self.assertEqual(repo.max_concurrent_runs, 2)
         self.assertFalse(repo.requires_human_review)
+        self.assertTrue(repo.enable_ai_review)
         self.assertFalse(repo.single_closeout_per_workspace)
         self.assertEqual(repo.closeout_sandbox, "danger-full-access")
 
@@ -77,6 +79,7 @@ local_path = "/repo"
         self.assertFalse(repo.auto_start_ready)
         self.assertEqual(repo.max_concurrent_runs, 1)
         self.assertTrue(repo.requires_human_review)
+        self.assertFalse(repo.enable_ai_review)
 
     def test_default_worker_timeout_is_eight_hours(self):
         with tempfile.TemporaryDirectory() as tmp:

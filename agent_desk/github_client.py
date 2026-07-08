@@ -141,13 +141,49 @@ class GitHubClient:
         )
         if not completed.stdout.strip():
             detail = completed.stderr.strip() or "No checks reported"
+            if no_checks_reported(detail):
+                return PullRequestChecksStatus(
+                    state="no_ci",
+                    summary=detail,
+                    head_sha=pr_view.head_sha,
+                    checks=[],
+                )
             return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=pr_view.head_sha, checks=[])
         try:
             raw_checks = json.loads(completed.stdout)
         except json.JSONDecodeError:
             detail = completed.stderr.strip() or "Could not parse PR checks"
             return PullRequestChecksStatus(state="unknown", summary=detail, head_sha=pr_view.head_sha, checks=[])
+        if not isinstance(raw_checks, list):
+            return PullRequestChecksStatus(
+                state="unknown",
+                summary="Unexpected PR checks JSON",
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
+        if not raw_checks:
+            return PullRequestChecksStatus(
+                state="no_ci",
+                summary="No checks reported",
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
         checks = normalize_checks(raw_checks)
+        if has_invalid_check_entry(raw_checks):
+            summary = "Invalid PR checks JSON entry" if checks else "No valid PR checks reported"
+            return PullRequestChecksStatus(
+                state="unknown",
+                summary=summary,
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
+        if not checks:
+            return PullRequestChecksStatus(
+                state="unknown",
+                summary="No valid PR checks reported",
+                head_sha=pr_view.head_sha,
+                checks=[],
+            )
         state, summary = summarize_checks(checks)
         return PullRequestChecksStatus(state=state, summary=summary, head_sha=pr_view.head_sha, checks=checks)
 
@@ -201,17 +237,30 @@ def normalize_checks(raw_checks: Any) -> list[dict[str, Any]]:
     for item in raw_checks:
         if not isinstance(item, dict):
             continue
+        state = str(item.get("state") or "")
+        bucket = str(item.get("bucket") or "")
+        if not state and not bucket:
+            continue
         checks.append(
             {
                 "name": str(item.get("name") or ""),
-                "state": str(item.get("state") or ""),
-                "bucket": str(item.get("bucket") or ""),
+                "state": state,
+                "bucket": bucket,
                 "description": str(item.get("description") or ""),
                 "link": str(item.get("link") or ""),
                 "workflow": str(item.get("workflow") or ""),
             }
         )
     return checks
+
+
+def has_invalid_check_entry(raw_checks: list[Any]) -> bool:
+    for item in raw_checks:
+        if not isinstance(item, dict):
+            return True
+        if not str(item.get("state") or "") and not str(item.get("bucket") or ""):
+            return True
+    return False
 
 
 def pr_has_merge_conflict(pr_view: PullRequestViewStatus) -> bool:
@@ -222,15 +271,18 @@ def pr_has_merge_conflict(pr_view: PullRequestViewStatus) -> bool:
 
 def summarize_checks(checks: list[dict[str, Any]]) -> tuple[str, str]:
     if not checks:
-        return "unknown", "No checks reported"
+        return "no_ci", "No checks reported"
     failed = sum(1 for check in checks if check_failed(check))
     pending = sum(1 for check in checks if check_pending(check))
     passed = sum(1 for check in checks if check_passed(check))
     skipped = sum(1 for check in checks if check_skipped(check))
+    unknown = len(checks) - failed - pending - passed - skipped
     if failed:
         state = "failure"
     elif pending:
         state = "pending"
+    elif unknown:
+        state = "unknown"
     else:
         state = "success"
     parts = []
@@ -242,6 +294,8 @@ def summarize_checks(checks: list[dict[str, Any]]) -> tuple[str, str]:
         parts.append(count_phrase(pending, "pending"))
     if skipped:
         parts.append(count_phrase(skipped, "skipped"))
+    if unknown:
+        parts.append(count_phrase(unknown, "unknown"))
     return state, ", ".join(parts) or "No checks reported"
 
 
@@ -256,6 +310,19 @@ def check_failed(check: dict[str, Any]) -> bool:
         "ACTION_REQUIRED",
         "STARTUP_FAILURE",
     }
+
+
+def no_checks_reported(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "no checks reported",
+            "no checks were reported",
+            "no checks found",
+            "no check runs found",
+        )
+    )
 
 
 def check_pending(check: dict[str, Any]) -> bool:

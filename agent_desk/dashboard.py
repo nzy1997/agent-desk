@@ -110,6 +110,10 @@ LOG_FILE_ORDER = [
     "auto-finish.stdout.jsonl",
     "auto-finish.stderr.log",
     "auto-finish-result.json",
+    "ai-review-prompt.md",
+    "ai-review.stdout.jsonl",
+    "ai-review.stderr.log",
+    "ai-review-result.json",
     "open-pr-prompt.md",
     "open-pr.stdout.jsonl",
     "open-pr.stderr.log",
@@ -510,6 +514,9 @@ def make_handler(
                         else None,
                         requires_human_review=payload.get("requires_human_review")
                         if "requires_human_review" in payload
+                        else None,
+                        enable_ai_review=payload.get("enable_ai_review")
+                        if "enable_ai_review" in payload
                         else None,
                         single_closeout_per_workspace=payload.get(
                             "single_closeout_per_workspace"

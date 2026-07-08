@@ -16,6 +16,7 @@ test_command = "python -m unittest"
 auto_start_ready = false
 max_concurrent_runs = 1
 requires_human_review = true
+enable_ai_review = false
 single_closeout_per_workspace = true
 
 # Keep PR publishing disabled until you are comfortable with the loop.

@@ -230,6 +230,7 @@ class DashboardTests(unittest.TestCase):
                 "auto_start_ready": True,
                 "max_concurrent_runs": 2,
                 "requires_human_review": True,
+                "enable_ai_review": False,
                 "single_closeout_per_workspace": True,
                 "worker_timeout_seconds": 28800,
             },
@@ -475,6 +476,14 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("CI running", HTML)
         self.assertIn("CI passed", HTML)
         self.assertIn("CI failed", HTML)
+        self.assertIn("No CI", HTML)
+
+    def test_dashboard_html_renders_ai_review_status(self):
+        self.assertIn("aiReviewStatus(run)", HTML)
+        self.assertIn("AI review running", HTML)
+        self.assertIn("AI review approved", HTML)
+        self.assertIn("AI review changes requested", HTML)
+        self.assertIn("AI review blocked", HTML)
 
     def test_state_payload_includes_projects_and_run_project_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -566,6 +575,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("worker-timeout-hours", HTML)
         self.assertIn("worker_timeout_seconds", HTML)
         self.assertIn("requires-human-review", HTML)
+        self.assertIn("enable-ai-review", HTML)
+        self.assertIn("enable_ai_review", HTML)
         self.assertIn("single-closeout-per-workspace", HTML)
         self.assertIn("saveSettings()", HTML)
 

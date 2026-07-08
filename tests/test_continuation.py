@@ -227,6 +227,37 @@ class ContinuationTests(unittest.TestCase):
             self.assertEqual(run["state"], "done")
             self.assertEqual(run["stage"], "finished")
 
+    def test_auto_finish_prompt_accepts_recorded_no_ci_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, store, run_id, worktree = self._store_with_pr_run(root)
+            store.update_run(
+                run_id,
+                pr_ci_status="no_ci",
+                pr_ci_summary="no checks reported on the 'agent/issue-7' branch",
+            )
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"merged","tests":[],"questions":[],"risks":[],"pr_url":"https://github.com/octo/example/pull/9","decision_log":[]}',
+                        "",
+                    )
+                ]
+            )
+
+            result = ContinuationRunner(config, store, runner).finish_after_ci_success(run_id)
+            call = runner.calls[0]
+
+        self.assertTrue(result.ok)
+        self.assertEqual(call.cwd, worktree)
+        self.assertIn("Agent Desk reports this pull request is eligible for automatic closeout", call.stdin)
+        self.assertIn("PR gate status: no_ci", call.stdin)
+        self.assertIn("no checks reported on the 'agent/issue-7' branch", call.stdin)
+        self.assertIn("If the gate is no_ci, confirm there are no required GitHub checks", call.stdin)
+        self.assertNotIn("GitHub CI has passed", call.stdin)
+
     def test_approve_finish_uses_configured_closeout_sandbox(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

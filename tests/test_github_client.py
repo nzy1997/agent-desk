@@ -127,6 +127,160 @@ class GitHubClientTests(unittest.TestCase):
             PullRequestChecksStatus(state="unknown", summary="No pull request URL", head_sha="", checks=[]),
         )
 
+    def test_pr_checks_status_reports_no_ci_for_empty_checks_json(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 0, "[]", ""),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/9",
+            )
+
+        self.assertEqual(status.state, "no_ci")
+        self.assertEqual(status.summary, "No checks reported")
+        self.assertEqual(status.head_sha, "abc123")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_reports_no_ci_for_gh_no_checks_message(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"def456"}', ""),
+                subprocess.CompletedProcess(
+                    ["gh", "pr", "checks"],
+                    1,
+                    "",
+                    "no checks reported on the 'agent/issue-44' branch",
+                ),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/10",
+            )
+
+        self.assertEqual(status.state, "no_ci")
+        self.assertEqual(status.summary, "no checks reported on the 'agent/issue-44' branch")
+        self.assertEqual(status.head_sha, "def456")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_keeps_ambiguous_empty_output_unknown(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 1, "", "GraphQL: timeout"),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/11",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "GraphQL: timeout")
+
+    def test_pr_checks_status_reports_unknown_for_non_list_checks_json(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 0, '{"unexpected":true}', ""),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/12",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "Unexpected PR checks JSON")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_reports_unknown_for_null_checks_json(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 0, "null", ""),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/13",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "Unexpected PR checks JSON")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_reports_unknown_for_invalid_check_entries(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 0, '[null,"bad"]', ""),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/14",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "No valid PR checks reported")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_reports_unknown_for_check_entries_without_state_signal(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 0, '[{"name":"unit"}]', ""),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/15",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "No valid PR checks reported")
+        self.assertEqual(status.checks, [])
+
+    def test_pr_checks_status_reports_unknown_for_unrecognized_check_state(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(["gh", "pr", "checks"], 0, '[{"name":"unit","state":"WEIRD"}]', ""),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/16",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "1 unknown")
+
+    def test_pr_checks_status_reports_unknown_for_mixed_valid_and_invalid_check_entries(self):
+        with patch("agent_desk.github_client.subprocess.run") as run:
+            run.side_effect = [
+                subprocess.CompletedProcess(["gh", "pr", "view"], 0, '{"headRefOid":"abc123"}', ""),
+                subprocess.CompletedProcess(
+                    ["gh", "pr", "checks"],
+                    0,
+                    '[{"name":"unit","state":"SUCCESS"},{"name":"mystery"}]',
+                    "",
+                ),
+            ]
+
+            status = GitHubClient().pr_checks_status(
+                "octo/example",
+                "https://github.com/octo/example/pull/17",
+            )
+
+        self.assertEqual(status.state, "unknown")
+        self.assertEqual(status.summary, "Invalid PR checks JSON entry")
+        self.assertEqual(status.checks, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -114,7 +114,21 @@ class Store:
 
     @staticmethod
     def _read(path: Path) -> dict[str, Any]:
-        return json.loads(path.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return Store._normalize_record(record)
+
+    @staticmethod
+    def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(record)
+        for key in (
+            "ai_review_status",
+            "ai_review_summary",
+            "ai_review_feedback",
+            "ai_review_checked_at",
+            "ai_review_head_sha",
+        ):
+            normalized.setdefault(key, "")
+        return normalized
 
     def _write_record(self, record: dict[str, Any]) -> Path:
         path = self._path_for(record["repo_name"], record["state"], record["id"])
@@ -161,6 +175,11 @@ class Store:
             "pr_ci_checked_at": "",
             "ci_fix_attempts": 0,
             "ci_fix_last_sha": "",
+            "ai_review_status": "",
+            "ai_review_summary": "",
+            "ai_review_feedback": "",
+            "ai_review_checked_at": "",
+            "ai_review_head_sha": "",
             "last_error": "",
             "dependencies": [],
             "blocked_by": [],
