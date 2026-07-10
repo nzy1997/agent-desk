@@ -677,8 +677,9 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("saveSettings()", HTML)
 
     def test_dashboard_html_renders_workspace_ai_settings_controls(self):
-        self.assertIn('id="default-ai-model"', HTML)
-        self.assertIn('id="default-ai-reasoning-effort"', HTML)
+        self.assertIn('<select id="default-ai-model"', HTML)
+        self.assertIn('<select id="default-ai-reasoning-effort"', HTML)
+        self.assertNotIn('id="default-ai-model" list=', HTML)
         self.assertIn("default_ai_model", HTML)
         self.assertIn("default_ai_reasoning_effort", HTML)
 
@@ -687,12 +688,41 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("/api/run/${runId}/ai-settings", HTML)
         self.assertIn("saveRunAiSettings(", HTML)
 
-    def test_dashboard_model_options_do_not_offer_unsavable_custom_choice(self):
+    def test_dashboard_model_options_are_select_options(self):
         self.assertNotIn("Custom...", HTML)
-        self.assertIn('list="default-ai-model-options"', HTML)
-        self.assertIn('list="default-ai-reasoning-options"', HTML)
+        self.assertNotIn('list="default-ai-model-options"', HTML)
+        self.assertNotIn("<datalist", HTML)
+        self.assertIn("modelOptionsHtml(state, settings.default_ai_model", HTML)
 
-    def test_dashboard_ai_controls_accept_custom_model_and_effort_values(self):
+    def test_dashboard_ai_controls_render_supported_model_select_options(self):
+        run_dashboard_js(
+            """
+            vm.runInContext(`latestState = {
+              ai_models: [{
+                id: 'gpt-5.5',
+                label: 'GPT-5.5',
+                default_reasoning_effort: 'medium',
+                reasoning_efforts: ['low', 'medium', 'high', 'xhigh']
+              }, {
+                id: 'gpt-5.6-terra',
+                label: 'GPT-5.6 Terra',
+                default_reasoning_effort: 'medium',
+                reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+              }]
+            }`, context);
+            const html = vm.runInContext(`aiSettingsHtml({
+              id: 42,
+              state: 'ready',
+              ai_model: 'gpt-5.6-terra',
+              ai_reasoning_effort: 'max'
+            }, 'runs')`, context);
+            assert(html.includes('<select id="run-ai-model-42-runs"'), html);
+            assert(html.includes('<option value="gpt-5.6-terra" selected>GPT-5.6 Terra</option>'), html);
+            assert(html.includes('<option value="max" selected>max</option>'), html);
+            """
+        )
+
+    def test_dashboard_ai_controls_preserve_unknown_current_select_values(self):
         run_dashboard_js(
             """
             vm.runInContext(`latestState = {
@@ -709,10 +739,8 @@ class DashboardTests(unittest.TestCase):
               ai_model: 'gpt-new-preview',
               ai_reasoning_effort: 'warp'
             }, 'runs')`, context);
-            assert(html.includes('value="gpt-new-preview"'), html);
-            assert(html.includes('value="warp"'), html);
-            assert(html.includes('list="run-ai-model-options-42-runs"'), html);
-            assert(html.includes('list="run-ai-reasoning-options-42-runs"'), html);
+            assert(html.includes('<option value="gpt-new-preview" selected>gpt-new-preview</option>'), html);
+            assert(html.includes('<option value="warp" selected>warp</option>'), html);
             """
         )
 
