@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .ai_settings import codex_ai_args
 from .config import AgentDeskConfig
 from .github_client import PullRequestChecksStatus
 from .store import Store, utc_now
@@ -63,6 +64,7 @@ class AIReviewRunner:
         )
         argv = [
             "codex",
+            *codex_ai_args(run),
             "--ask-for-approval",
             "never",
             "--sandbox",

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .ai_settings import codex_ai_args
 from .config import AgentDeskConfig, RepoConfig
 from .github_client import GitHubClient
 from .github_client import PullRequestChecksStatus
@@ -151,6 +152,7 @@ class ContinuationRunner:
         self.store.add_event(run_id, "info", action, f"Starting {action}", {})
         argv = [
             "codex",
+            *codex_ai_args(run),
             "--ask-for-approval",
             "never",
             "--sandbox",

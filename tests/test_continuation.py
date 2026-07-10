@@ -187,7 +187,12 @@ class ContinuationTests(unittest.TestCase):
             run = store.get_run(run_id)
 
             self.assertTrue(result.ok)
-            self.assertEqual(call.argv[:8], ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "-C", str(worktree), "exec"])
+            self.assertEqual(call.argv[0], "codex")
+            ask_index = call.argv.index("--ask-for-approval")
+            self.assertEqual(call.argv[ask_index : ask_index + 3], ["--ask-for-approval", "never", "--sandbox"])
+            self.assertEqual(call.argv[call.argv.index("--sandbox") + 1], "workspace-write")
+            self.assertEqual(call.argv[call.argv.index("-C") + 1], str(worktree))
+            self.assertLess(call.argv.index("-C"), call.argv.index("exec"))
             self.assertEqual(call.idle_timeout, config.worker_idle_timeout_seconds)
             self.assertIn("resume", call.argv)
             self.assertIn("019ed932-fe5d-7391-b856-98b2239a6380", call.argv)
@@ -195,6 +200,51 @@ class ContinuationTests(unittest.TestCase):
             self.assertIn("push the updates to the existing PR branch", call.stdin)
             self.assertEqual(run["state"], "pr_open")
             self.assertEqual(run["stage"], "changes addressed")
+
+    def test_request_changes_passes_run_ai_settings_to_codex_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            worktree = root / "worktree"
+            worktree.mkdir()
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/example", local_path=root / "repo")],
+            )
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="PR",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-pr",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                worktree_path=str(worktree),
+                codex_thread_id="thread-1",
+                ai_model="gpt-5.6-sol",
+                ai_reasoning_effort="max",
+            )
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec", "resume"],
+                        0,
+                        '{"status":"done","summary":"ok","tests":[],"questions":[],"pr_url":"https://github.com/octo/example/pull/1"}',
+                        "",
+                    )
+                ]
+            )
+
+            ContinuationRunner(config, store, runner=runner).request_changes(run_id, "Please revise")
+            argv = runner.calls[0].argv
+
+        self.assertIn("-m", argv)
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.6-sol")
+        self.assertIn('model_reasoning_effort="max"', argv)
+        self.assertLess(argv.index("-m"), argv.index("exec"))
 
     def test_approve_finish_resumes_thread_with_generic_closeout_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -289,10 +339,10 @@ class ContinuationTests(unittest.TestCase):
 
             self.assertTrue(result.ok)
             self.assertEqual(call.cwd, worktree)
-            self.assertEqual(
-                call.argv[:8],
-                ["codex", "--ask-for-approval", "never", "--sandbox", "danger-full-access", "-C", str(worktree), "exec"],
-            )
+            self.assertEqual(call.argv[0], "codex")
+            self.assertEqual(call.argv[call.argv.index("--sandbox") + 1], "danger-full-access")
+            self.assertEqual(call.argv[call.argv.index("-C") + 1], str(worktree))
+            self.assertLess(call.argv.index("-C"), call.argv.index("exec"))
 
     def test_request_changes_keeps_workspace_write_sandbox(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -325,10 +375,10 @@ class ContinuationTests(unittest.TestCase):
 
             self.assertTrue(result.ok)
             self.assertEqual(call.cwd, worktree)
-            self.assertEqual(
-                call.argv[:8],
-                ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "-C", str(worktree), "exec"],
-            )
+            self.assertEqual(call.argv[0], "codex")
+            self.assertEqual(call.argv[call.argv.index("--sandbox") + 1], "workspace-write")
+            self.assertEqual(call.argv[call.argv.index("-C") + 1], str(worktree))
+            self.assertLess(call.argv.index("-C"), call.argv.index("exec"))
 
     def test_open_pull_request_resumes_thread_and_requires_pr_url(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -449,10 +499,10 @@ class ContinuationTests(unittest.TestCase):
 
             self.assertTrue(result.ok)
             self.assertEqual(call.cwd, worktree)
-            self.assertEqual(
-                call.argv[:8],
-                ["codex", "--ask-for-approval", "never", "--sandbox", "danger-full-access", "-C", str(worktree), "exec"],
-            )
+            self.assertEqual(call.argv[0], "codex")
+            self.assertEqual(call.argv[call.argv.index("--sandbox") + 1], "danger-full-access")
+            self.assertEqual(call.argv[call.argv.index("-C") + 1], str(worktree))
+            self.assertLess(call.argv.index("-C"), call.argv.index("exec"))
 
     def test_approve_finish_backfills_thread_id_from_historical_stdout_jsonl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -596,10 +646,10 @@ class ContinuationTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(call.cwd, worktree)
-        self.assertEqual(
-            call.argv[:8],
-            ["codex", "--ask-for-approval", "never", "--sandbox", "danger-full-access", "-C", str(worktree), "exec"],
-        )
+        self.assertEqual(call.argv[0], "codex")
+        self.assertEqual(call.argv[call.argv.index("--sandbox") + 1], "danger-full-access")
+        self.assertEqual(call.argv[call.argv.index("-C") + 1], str(worktree))
+        self.assertLess(call.argv.index("-C"), call.argv.index("exec"))
 
 
 if __name__ == "__main__":
