@@ -89,8 +89,10 @@ function modelOptionsHtml(state, selected) {
   const options = aiCatalog(state).map(item =>
     `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(item.label || item.id)}</option>`
   ).join('');
-  const customSelected = selected && !aiOption(state, selected) ? 'selected' : '';
-  return `${options}<option value="${esc(selected && customSelected ? selected : 'custom')}" ${customSelected}>${customSelected ? esc(selected) : 'Custom...'}</option>`;
+  const unknownSelected = selected && !aiOption(state, selected)
+    ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>`
+    : '';
+  return `${options}${unknownSelected}`;
 }
 function reasoningOptionsHtml(state, model, selected) {
   const option = aiOption(state, model);

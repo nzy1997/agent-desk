@@ -614,6 +614,10 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("/api/run/${runId}/ai-settings", HTML)
         self.assertIn("saveRunAiSettings(", HTML)
 
+    def test_dashboard_model_options_do_not_offer_unsavable_custom_choice(self):
+        self.assertNotIn("Custom...", HTML)
+        self.assertIn("const unknownSelected = selected && !aiOption(state, selected)", HTML)
+
     def test_dashboard_html_includes_restart_button(self):
         self.assertIn("Restart", HTML)
         self.assertIn("/api/actions/restart", HTML)
