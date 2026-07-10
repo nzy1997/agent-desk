@@ -122,10 +122,10 @@ class AIReviewTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertEqual(result.status, "approved")
             self.assertEqual(call.cwd, worktree)
-            self.assertEqual(
-                call.argv[:8],
-                ["codex", "--ask-for-approval", "never", "--sandbox", "read-only", "-C", str(worktree), "exec"],
-            )
+            self.assertEqual(call.argv[0], "codex")
+            self.assertEqual(call.argv[call.argv.index("--sandbox") + 1], "read-only")
+            self.assertEqual(call.argv[call.argv.index("-C") + 1], str(worktree))
+            self.assertLess(call.argv.index("-C"), call.argv.index("exec"))
             self.assertIn("--output-last-message", call.argv)
             self.assertEqual(run["state"], "pr_open")
             self.assertEqual(run["stage"], "ai-review approved")
@@ -134,6 +134,50 @@ class AIReviewTests(unittest.TestCase):
             self.assertEqual(run["ai_review_head_sha"], "abc123")
             self.assertTrue((run_dir / "ai-review-prompt.md").exists())
             self.assertTrue((run_dir / "ai-review-result.json").exists())
+
+    def test_ai_review_passes_run_ai_settings_to_codex_exec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktree = root / "worktree"
+            worktree.mkdir()
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(data_dir=root / "data")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="Review",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-review",
+            )
+            store.update_run(
+                run_id,
+                state="pr_open",
+                stage="pull request opened",
+                pr_url="https://github.com/octo/example/pull/1",
+                worktree_path=str(worktree),
+                ai_model="gpt-5.6-luna",
+                ai_reasoning_effort="max",
+            )
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["codex", "exec"],
+                        0,
+                        '{"status":"approved","summary":"ok","findings":[],"feedback":"","risks":[],"pr_url":"https://github.com/octo/example/pull/1"}',
+                        "",
+                    )
+                ]
+            )
+
+            AIReviewRunner(config, store, runner=runner).review(
+                run_id,
+                PullRequestChecksStatus(state="success", summary="passed", head_sha="abc", checks=[]),
+            )
+            argv = runner.calls[0].argv
+
+        self.assertIn("-m", argv)
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.6-luna")
+        self.assertIn('model_reasoning_effort="max"', argv)
 
     def test_review_jsonl_stdout_fallback_writes_only_final_review_json(self):
         with tempfile.TemporaryDirectory() as tmp:

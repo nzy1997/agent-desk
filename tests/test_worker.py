@@ -251,7 +251,9 @@ class WorkerTests(unittest.TestCase):
             )
 
             codex_call = runner.calls[2]
-            self.assertEqual(codex_call.argv[:4], ["codex", "--ask-for-approval", "never", "exec"])
+            self.assertEqual(codex_call.argv[0], "codex")
+            ask_index = codex_call.argv.index("--ask-for-approval")
+            self.assertEqual(codex_call.argv[ask_index : ask_index + 3], ["--ask-for-approval", "never", "exec"])
             self.assertIn("--json", codex_call.argv)
             self.assertIn("--sandbox", codex_call.argv)
             self.assertIn("workspace-write", codex_call.argv)
@@ -259,6 +261,54 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result.status, "done")
             self.assertTrue((config.data_dir / "runs" / f"run-{run_id}" / "prompt.md").exists())
             self.assertTrue((config.data_dir / "runs" / f"run-{run_id}" / "stdout.jsonl").exists())
+
+    def test_worker_passes_run_ai_settings_to_codex_exec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_path = root / "repo"
+            repo_path.mkdir()
+            config = AgentDeskConfig(data_dir=root / "data")
+            repo = RepoConfig(name="octo/example", local_path=repo_path, push_pr=False)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name=repo.name,
+                issue_number=30,
+                issue_title="Use model",
+                issue_url="https://github.com/octo/example/issues/30",
+                branch_name="agent/issue-30-use-model",
+            )
+            store.update_run(run_id, ai_model="gpt-5.6-terra", ai_reasoning_effort="high")
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(["git", "fetch"], 0, "", ""),
+                    CommandResult(["git", "worktree"], 0, "", ""),
+                    CommandResult(
+                        ["codex", "exec"],
+                        0,
+                        '{"status":"done","summary":"ok","tests":[],"questions":[]}',
+                        "",
+                    ),
+                ]
+            )
+
+            Worker(config, store, runner).run_issue(
+                run_id=run_id,
+                repo=repo,
+                issue_number=30,
+                issue_title="Use model",
+                issue_body="Body",
+                issue_url="https://github.com/octo/example/issues/30",
+                branch_name="agent/issue-30-use-model",
+            )
+
+            argv = runner.calls[2].argv
+
+        self.assertEqual(argv[0], "codex")
+        self.assertIn("-m", argv)
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-5.6-terra")
+        self.assertIn("-c", argv)
+        self.assertIn('model_reasoning_effort="high"', argv)
+        self.assertLess(argv.index("-m"), argv.index("exec"))
 
     def test_worker_marks_run_pr_open_when_codex_returns_pr_url(self):
         with tempfile.TemporaryDirectory() as tmp:

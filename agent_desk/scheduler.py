@@ -10,6 +10,7 @@ import sys
 import threading
 from typing import Any, Callable
 
+from .ai_settings import DEFAULT_AI_MODEL, DEFAULT_AI_REASONING_EFFORT, normalize_ai_settings
 from .config import DEFAULT_WORKER_TIMEOUT_SECONDS, AgentDeskConfig, RepoConfig
 from .ai_review import AIReviewRunner
 from .continuation import ContinuationRunner
@@ -66,6 +67,8 @@ class SchedulerSettings:
     enable_ai_review: bool = False
     single_closeout_per_workspace: bool = True
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS
+    default_ai_model: str = DEFAULT_AI_MODEL
+    default_ai_reasoning_effort: str = DEFAULT_AI_REASONING_EFFORT
 
     @classmethod
     def from_repo(
@@ -74,6 +77,7 @@ class SchedulerSettings:
         *,
         worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
     ) -> "SchedulerSettings":
+        model, effort = normalize_ai_settings(repo.default_ai_model, repo.default_ai_reasoning_effort)
         return cls(
             auto_start_ready=repo.auto_start_ready,
             max_concurrent_runs=max(1, repo.max_concurrent_runs),
@@ -81,9 +85,11 @@ class SchedulerSettings:
             enable_ai_review=repo.enable_ai_review,
             single_closeout_per_workspace=repo.single_closeout_per_workspace,
             worker_timeout_seconds=max(60, int(worker_timeout_seconds)),
+            default_ai_model=model,
+            default_ai_reasoning_effort=effort,
         )
 
-    def as_payload(self) -> dict[str, bool | int]:
+    def as_payload(self) -> dict[str, bool | int | str]:
         return {
             "auto_start_ready": self.auto_start_ready,
             "max_concurrent_runs": self.max_concurrent_runs,
@@ -91,6 +97,8 @@ class SchedulerSettings:
             "enable_ai_review": self.enable_ai_review,
             "single_closeout_per_workspace": self.single_closeout_per_workspace,
             "worker_timeout_seconds": self.worker_timeout_seconds,
+            "default_ai_model": self.default_ai_model,
+            "default_ai_reasoning_effort": self.default_ai_reasoning_effort,
         }
 
 
@@ -268,7 +276,28 @@ class Scheduler:
         )
         return RunNextResult(True, "Run interrupted", run_id)
 
-    def settings_payload(self, workspace_path: str | Path | None = None) -> dict[str, bool | int] | None:
+    def update_run_ai_settings(
+        self,
+        run_id: int,
+        ai_model: str,
+        ai_reasoning_effort: str,
+    ) -> RunNextResult:
+        with self._lock:
+            run = self.store.get_run(run_id)
+            if run["state"] == "running":
+                return RunNextResult(False, f"Run #{run_id} is running and cannot change AI settings", run_id)
+            model, effort = normalize_ai_settings(ai_model, ai_reasoning_effort)
+            self.store.update_run(run_id, ai_model=model, ai_reasoning_effort=effort)
+            self.store.add_event(
+                run_id,
+                "info",
+                "ai-settings",
+                f"AI settings updated to {model} / {effort}",
+                {"ai_model": model, "ai_reasoning_effort": effort},
+            )
+            return RunNextResult(True, f"AI settings updated for run #{run_id}", run_id)
+
+    def settings_payload(self, workspace_path: str | Path | None = None) -> dict[str, bool | int | str] | None:
         with self._lock:
             repo = self._repo_for_settings(workspace_path)
             if repo is None:
@@ -285,7 +314,9 @@ class Scheduler:
         enable_ai_review: bool | None = None,
         single_closeout_per_workspace: bool | None = None,
         worker_timeout_seconds: int | None = None,
-    ) -> dict[str, bool | int]:
+        default_ai_model: str | None = None,
+        default_ai_reasoning_effort: str | None = None,
+    ) -> dict[str, bool | int | str]:
         with self._lock:
             repo = self._repo_for_settings(workspace_path)
             if repo is None:
@@ -309,6 +340,15 @@ class Scheduler:
                 if value < 60:
                     raise ValueError("worker_timeout_seconds must be at least 60")
                 settings.worker_timeout_seconds = value
+            if default_ai_model is not None or default_ai_reasoning_effort is not None:
+                model, effort = normalize_ai_settings(
+                    default_ai_model if default_ai_model is not None else settings.default_ai_model,
+                    default_ai_reasoning_effort
+                    if default_ai_reasoning_effort is not None
+                    else settings.default_ai_reasoning_effort,
+                )
+                settings.default_ai_model = model
+                settings.default_ai_reasoning_effort = effort
             return settings.as_payload()
 
     def serve_forever(self) -> None:
@@ -1091,7 +1131,14 @@ class Scheduler:
         number = int(record["issue_number"])
         title = str(record.get("issue_title") or f"Issue {number}")
         branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
-        self.store.update_run(record["id"], state="ready", stage="waiting for human run", branch_name=branch, **fields)
+        update_fields = {**self._ai_settings_fields_for_record(repo, record), **fields}
+        self.store.update_run(
+            record["id"],
+            state="ready",
+            stage="waiting for human run",
+            branch_name=branch,
+            **update_fields,
+        )
         self.store.add_event(record["id"], "info", "ready", "Issue is ready to run", {"repo": repo.name})
         return record["id"]
 
@@ -1099,12 +1146,13 @@ class Scheduler:
         number = int(record["issue_number"])
         title = str(record.get("issue_title") or f"Issue {number}")
         branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
+        update_fields = {**self._ai_settings_fields_for_record(repo, record), **fields}
         self.store.update_run(
             record["id"],
             state=DEPENDENCY_WAITING_STATE,
             stage=DEPENDENCY_WAITING_STAGE,
             branch_name=branch,
-            **fields,
+            **update_fields,
         )
         self.store.add_event(record["id"], "info", "dependencies", "Issue is waiting for dependencies", fields)
         return record["id"]
@@ -1123,7 +1171,8 @@ class Scheduler:
             branch_name=branch,
             issue_body=body,
         )
-        self.store.update_run(run_id, state="ready", stage="waiting for human run", **fields)
+        update_fields = {**self._ai_settings_fields_for_repo(repo), **fields}
+        self.store.update_run(run_id, state="ready", stage="waiting for human run", **update_fields)
         self.store.add_event(run_id, "info", "ready", "Issue is ready to run", {"repo": repo.name})
         return run_id
 
@@ -1141,7 +1190,13 @@ class Scheduler:
             branch_name=branch,
             issue_body=body,
         )
-        self.store.update_run(run_id, state=DEPENDENCY_WAITING_STATE, stage=DEPENDENCY_WAITING_STAGE, **fields)
+        update_fields = {**self._ai_settings_fields_for_repo(repo), **fields}
+        self.store.update_run(
+            run_id,
+            state=DEPENDENCY_WAITING_STATE,
+            stage=DEPENDENCY_WAITING_STAGE,
+            **update_fields,
+        )
         self.store.add_event(run_id, "info", "dependencies", "Issue is waiting for dependencies", fields)
         return run_id
 
@@ -1472,6 +1527,26 @@ class Scheduler:
             )
             self._settings_by_workspace[key] = settings
         return settings
+
+    def _ai_settings_fields_for_repo(self, repo: RepoConfig) -> dict[str, str]:
+        settings = self._settings_for_repo(repo)
+        model, effort = normalize_ai_settings(
+            settings.default_ai_model,
+            settings.default_ai_reasoning_effort,
+        )
+        return {"ai_model": model, "ai_reasoning_effort": effort}
+
+    def _ai_settings_fields_for_record(self, repo: RepoConfig, record: dict) -> dict[str, str]:
+        if record["state"] == "available":
+            return self._ai_settings_fields_for_repo(repo)
+        return {
+            "ai_model": str(record["ai_model"] if "ai_model" in record else DEFAULT_AI_MODEL),
+            "ai_reasoning_effort": str(
+                record["ai_reasoning_effort"]
+                if "ai_reasoning_effort" in record
+                else DEFAULT_AI_REASONING_EFFORT
+            ),
+        }
 
     def _config_for_repo(self, repo: RepoConfig) -> AgentDeskConfig:
         timeout = self._settings_for_repo(repo).worker_timeout_seconds

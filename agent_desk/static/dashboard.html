@@ -156,6 +156,17 @@
       padding: 5px 6px;
       font: inherit;
     }
+    .setting-row select,
+    .setting-row input[list],
+    .ai-settings select,
+    .ai-settings input {
+      min-width: 112px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 5px 6px;
+      font: inherit;
+      background: #fff;
+    }
     .setting-row input[type="checkbox"] {
       width: 16px;
       height: 16px;
@@ -209,6 +220,22 @@
     .ai-review-status-changes_requested,
     .ai-review-status-blocked { border-color: #f4b7b0; color: var(--bad); }
     .ai-review-status-unknown { color: var(--muted); }
+    .ai-settings {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin-top: 8px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafc;
+      font-size: 12px;
+    }
+    .ai-settings button {
+      padding: 4px 7px;
+      font-size: 12px;
+    }
     .event.error { border-color: #f4b7b0; }
     .event.warning { border-color: #f7c46c; }
     .log-links {
@@ -399,6 +426,16 @@
         <label class="setting-row" for="worker-timeout-hours">
           <span>Time limit (h)</span>
           <input id="worker-timeout-hours" type="number" min="0.25" step="0.25" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+        </label>
+        <label class="setting-row" for="default-ai-model">
+          <span>Default model</span>
+          <input id="default-ai-model" list="default-ai-model-options" onchange="onWorkspaceModelChange(); markSettingsDirty()" oninput="markSettingsDirty()">
+          <datalist id="default-ai-model-options"></datalist>
+        </label>
+        <label class="setting-row" for="default-ai-reasoning-effort">
+          <span>Default reasoning</span>
+          <input id="default-ai-reasoning-effort" list="default-ai-reasoning-options" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+          <datalist id="default-ai-reasoning-options"></datalist>
         </label>
         <label class="setting-row" for="requires-human-review">
           <span>Require human review</span>

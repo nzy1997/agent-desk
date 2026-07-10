@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any
 
+from .ai_settings import codex_ai_args
 from .codex_activity import CodexThreadActivityMonitor
 from .codex_executable import resolve_codex_argv
 from .config import AgentDeskConfig, RepoConfig
@@ -363,6 +364,7 @@ class Worker:
         result_path = run_dir / "result.json"
         argv = [
             "codex",
+            *codex_ai_args(self.store.get_run(run_id)),
             "--ask-for-approval",
             "never",
             "exec",
