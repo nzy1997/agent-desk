@@ -77,6 +77,44 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(run["ai_review_checked_at"], "")
         self.assertEqual(run["ai_review_head_sha"], "")
 
+    def test_create_run_defaults_ai_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=5,
+                issue_title="AI defaults",
+                issue_url="https://github.com/octo/example/issues/5",
+                branch_name="agent/issue-5-ai-defaults",
+            )
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["ai_model"], "gpt-5.5")
+        self.assertEqual(run["ai_reasoning_effort"], "xhigh")
+
+    def test_existing_run_records_normalize_missing_ai_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name="octo/example",
+                issue_number=6,
+                issue_title="Old record",
+                issue_url="https://github.com/octo/example/issues/6",
+                branch_name="agent/issue-6-old-record",
+            )
+            path = store._find_path(run_id)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record.pop("ai_model", None)
+            record.pop("ai_reasoning_effort", None)
+            path.write_text(json.dumps(record), encoding="utf-8")
+
+            run = store.get_run(run_id)
+
+        self.assertEqual(run["ai_model"], "gpt-5.5")
+        self.assertEqual(run["ai_reasoning_effort"], "xhigh")
+
     def test_legacy_records_default_missing_ai_review_fields_on_read(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

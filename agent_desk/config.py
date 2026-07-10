@@ -7,6 +7,8 @@ import re
 import subprocess
 import tomllib
 
+from .ai_settings import DEFAULT_AI_MODEL, DEFAULT_AI_REASONING_EFFORT
+
 
 DEFAULT_WORKER_TIMEOUT_SECONDS = 8 * 60 * 60
 
@@ -32,6 +34,8 @@ class RepoConfig:
     mutate_github: bool = False
     push_pr: bool = False
     closeout_sandbox: str = "workspace-write"
+    default_ai_model: str = DEFAULT_AI_MODEL
+    default_ai_reasoning_effort: str = DEFAULT_AI_REASONING_EFFORT
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,11 @@ def load_config(path: str | Path) -> AgentDeskConfig:
                 mutate_github=bool(repo_raw.get("mutate_github", False)),
                 push_pr=bool(repo_raw.get("push_pr", False)),
                 closeout_sandbox=repo_raw.get("closeout_sandbox", "workspace-write"),
+                default_ai_model=repo_raw.get("default_ai_model", DEFAULT_AI_MODEL),
+                default_ai_reasoning_effort=repo_raw.get(
+                    "default_ai_reasoning_effort",
+                    DEFAULT_AI_REASONING_EFFORT,
+                ),
             )
         )
     return AgentDeskConfig(
@@ -157,6 +166,8 @@ def add_project_to_config(config_path: str | Path, local_path: str | Path, repo_
         single_closeout_per_workspace=template.single_closeout_per_workspace,
         push_pr=template.push_pr,
         closeout_sandbox=template.closeout_sandbox,
+        default_ai_model=template.default_ai_model,
+        default_ai_reasoning_effort=template.default_ai_reasoning_effort,
     )
     with config_path.open("a", encoding="utf-8") as handle:
         handle.write("\n\n")
@@ -229,6 +240,8 @@ def _repo_config_toml(repo: RepoConfig) -> str:
             f"single_closeout_per_workspace = {_toml_bool(repo.single_closeout_per_workspace)}",
             f"push_pr = {_toml_bool(repo.push_pr)}",
             f"closeout_sandbox = {_toml_string(repo.closeout_sandbox)}",
+            f"default_ai_model = {_toml_string(repo.default_ai_model)}",
+            f"default_ai_reasoning_effort = {_toml_string(repo.default_ai_reasoning_effort)}",
         ]
     )
 
@@ -258,4 +271,6 @@ single_closeout_per_workspace = true
 # Keep PR publishing disabled until you are comfortable with the loop.
 push_pr = false
 closeout_sandbox = "workspace-write"
+default_ai_model = "gpt-5.5"
+default_ai_reasoning_effort = "xhigh"
 """

@@ -81,6 +81,48 @@ local_path = "/repo"
         self.assertTrue(repo.requires_human_review)
         self.assertFalse(repo.enable_ai_review)
 
+    def test_ai_settings_default_to_gpt55_xhigh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "repos.toml"
+            config_path.write_text(
+                """
+[agent_desk]
+data_dir = ".agent-desk"
+
+[[repos]]
+name = "octo/example"
+local_path = "/repo"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            repo = load_config(config_path).repos[0]
+
+        self.assertEqual(repo.default_ai_model, "gpt-5.5")
+        self.assertEqual(repo.default_ai_reasoning_effort, "xhigh")
+
+    def test_loads_explicit_ai_settings_from_toml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "repos.toml"
+            config_path.write_text(
+                """
+[agent_desk]
+data_dir = ".agent-desk"
+
+[[repos]]
+name = "octo/example"
+local_path = "/repo"
+default_ai_model = "gpt-5.6-terra"
+default_ai_reasoning_effort = "high"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            repo = load_config(config_path).repos[0]
+
+        self.assertEqual(repo.default_ai_model, "gpt-5.6-terra")
+        self.assertEqual(repo.default_ai_reasoning_effort, "high")
+
     def test_default_worker_timeout_is_eight_hours(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "repos.toml"
@@ -147,6 +189,10 @@ closeout_sandbox = "danger-full-access"
         self.assertFalse(config.repos[1].mutate_github)
         self.assertTrue(config.repos[1].push_pr)
         self.assertEqual(config.repos[1].closeout_sandbox, "danger-full-access")
+        self.assertEqual(config.repos[1].default_ai_model, "gpt-5.5")
+        self.assertEqual(config.repos[1].default_ai_reasoning_effort, "xhigh")
+        self.assertIn('default_ai_model = "gpt-5.5"', appended_block)
+        self.assertIn('default_ai_reasoning_effort = "xhigh"', appended_block)
 
     def test_example_config_omits_issue_label_mutation_settings(self):
         text = example_config()
@@ -158,6 +204,8 @@ closeout_sandbox = "danger-full-access"
         self.assertNotIn("blocked_label", text)
         self.assertNotIn("needs_review_label", text)
         self.assertNotIn("mutate_github", text)
+        self.assertIn('default_ai_model = "gpt-5.5"', text)
+        self.assertIn('default_ai_reasoning_effort = "xhigh"', text)
 
     def test_add_project_to_config_is_idempotent_for_existing_folder(self):
         with tempfile.TemporaryDirectory() as tmp:

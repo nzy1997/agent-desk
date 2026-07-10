@@ -8,6 +8,8 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from .ai_settings import DEFAULT_AI_MODEL, DEFAULT_AI_REASONING_EFFORT
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX fallback
@@ -128,6 +130,8 @@ class Store:
             "ai_review_head_sha",
         ):
             normalized.setdefault(key, "")
+        normalized.setdefault("ai_model", DEFAULT_AI_MODEL)
+        normalized.setdefault("ai_reasoning_effort", DEFAULT_AI_REASONING_EFFORT)
         return normalized
 
     def _write_record(self, record: dict[str, Any]) -> Path:
@@ -180,6 +184,8 @@ class Store:
             "ai_review_feedback": "",
             "ai_review_checked_at": "",
             "ai_review_head_sha": "",
+            "ai_model": DEFAULT_AI_MODEL,
+            "ai_reasoning_effort": DEFAULT_AI_REASONING_EFFORT,
             "last_error": "",
             "dependencies": [],
             "blocked_by": [],
