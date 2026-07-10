@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import tempfile
 import sys
@@ -21,6 +22,26 @@ from agent_desk.worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_command_runner_resolves_codex_to_absolute_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "bundled-codex"
+            executable.write_text(
+                "#!/bin/sh\nprintf 'codex-test\\n'\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+
+            with patch.dict(
+                os.environ,
+                {"PATH": "", "AGENT_DESK_CODEX": str(executable)},
+                clear=False,
+            ):
+                result = CommandRunner().run(["codex", "--version"])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "codex-test\n")
+        self.assertEqual(result.argv[0], str(executable.resolve()))
+
     def test_worker_retries_reference_lock_fetch_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

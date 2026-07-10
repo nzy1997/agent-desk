@@ -32,7 +32,7 @@
 - Produces: `resolve_codex_argv(argv: Sequence[str]) -> list[str]`.
 - Consumes: logical command argv passed to `CommandRunner.run()`.
 
-- [ ] **Step 1: Write failing resolver and real-runner tests**
+- [x] **Step 1: Write failing resolver and real-runner tests**
 
 Create `tests/test_codex_executable.py`:
 
@@ -115,13 +115,13 @@ def test_command_runner_resolves_codex_to_absolute_executable(self):
     self.assertEqual(result.argv[0], str(executable.resolve()))
 ```
 
-- [ ] **Step 2: Run the tests and verify RED**
+- [x] **Step 2: Run the tests and verify RED**
 
 Run: `python3 -m unittest tests.test_codex_executable tests.test_worker.WorkerTests.test_command_runner_resolves_codex_to_absolute_executable -v`
 
 Expected: import failure because `agent_desk.codex_executable` does not exist.
 
-- [ ] **Step 3: Implement the resolver module**
+- [x] **Step 3: Implement the resolver module**
 
 ```python
 from __future__ import annotations
@@ -185,7 +185,7 @@ def resolve_codex_argv(argv: Sequence[str]) -> list[str]:
     return resolved
 ```
 
-- [ ] **Step 4: Resolve argv once in `CommandRunner.run()`**
+- [x] **Step 4: Resolve argv once in `CommandRunner.run()`**
 
 Add the import:
 
@@ -196,21 +196,22 @@ from .codex_executable import resolve_codex_argv
 Then begin `CommandRunner.run()` with:
 
 ```python
+codex_json_command = is_codex_json_command(argv)
 argv = resolve_codex_argv(argv)
 started_at = time.monotonic()
 ```
 
-The method's existing `subprocess.Popen`, `is_codex_json_command`, and
-`CommandResult` calls already consume the local `argv` variable, so no other
-call-site changes are required.
+Use `codex_json_command` for the existing activity-monitor condition. The
+method's `subprocess.Popen` and `CommandResult` calls consume the resolved local
+`argv` variable, so no business-layer call-site changes are required.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run: `python3 -m unittest tests.test_codex_executable tests.test_worker -v`
 
 Expected: all resolver and worker tests pass.
 
-- [ ] **Step 6: Run stripped-PATH smoke verification**
+- [x] **Step 6: Run stripped-PATH smoke verification**
 
 Run:
 
@@ -222,7 +223,7 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin /opt/homebrew/bin/python3 -c \
 Expected: exit zero; printed `result.argv[0]` equals
 `/Applications/ChatGPT.app/Contents/Resources/codex`.
 
-- [ ] **Step 7: Run full verification and commit**
+- [x] **Step 7: Run full verification and commit**
 
 Run: `make test`
 

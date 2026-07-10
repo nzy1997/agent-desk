@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from .codex_activity import CodexThreadActivityMonitor
+from .codex_executable import resolve_codex_argv
 from .config import AgentDeskConfig, RepoConfig
 from .prompt import render_worker_prompt
 from .repository_setup import repository_setup_lock
@@ -136,6 +137,8 @@ class CommandRunner:
         activity_monitor: CodexThreadActivityMonitor | None = None,
         activity_monitor_poll_interval: float = 5.0,
     ) -> CommandResult:
+        codex_json_command = is_codex_json_command(argv)
+        argv = resolve_codex_argv(argv)
         started_at = time.monotonic()
         last_activity_at = started_at
         last_activity_source = "process start"
@@ -194,7 +197,7 @@ class CommandRunner:
             except BrokenPipeError:
                 pass
 
-        if activity_monitor is None and stdout_path is not None and is_codex_json_command(argv):
+        if activity_monitor is None and stdout_path is not None and codex_json_command:
             activity_monitor = CodexThreadActivityMonitor(
                 stdout_path,
                 poll_interval_seconds=activity_monitor_poll_interval,
