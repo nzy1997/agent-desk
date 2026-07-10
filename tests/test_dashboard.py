@@ -799,6 +799,66 @@ class DashboardTests(unittest.TestCase):
             """
         )
 
+    def test_dashboard_refresh_replaces_dirty_card_when_run_starts(self):
+        run_dashboard_js(
+            """
+            elements.runs = makeElement('runs');
+            elements.attention = makeElement('attention');
+            elements.stats = makeElement('stats');
+            elements.events = makeElement('events');
+            elements.health = makeElement('health');
+            elements['runs-title'] = makeElement('runs-title');
+            elements['project-back'] = makeElement('project-back');
+            elements['issue-tools'] = makeElement('issue-tools');
+            elements['issue-picker'] = makeElement('issue-picker');
+            vm.runInContext(`location.hash = '#project=' + encodeURIComponent('/repo')`, context);
+            vm.runInContext(`markRunAiDirty(7, 'runs')`, context);
+            elements.runs.innerHTML = '<div id="stale-editable">unsaved</div>';
+            vm.runInContext(`fetchState = async () => ({
+              ai_models: [],
+              runs: [{ id: 7, state: 'running', issue_number: 7, issue_title: 'Now running', project_path: '/repo' }],
+              projects: [{ name: 'repo', path: '/repo', settings: {} }],
+              stats: { running: 1 },
+              events: [],
+              scheduler: { paused: false }
+            })`, context);
+            await vm.runInContext(`refresh()`, context);
+            assert.notStrictEqual(elements.runs.innerHTML, '<div id="stale-editable">unsaved</div>');
+            assert(elements.runs.innerHTML.includes('running'), elements.runs.innerHTML);
+            assert.strictEqual(vm.runInContext(`hasDirtyRunAiInScope('runs')`, context), false);
+            """
+        )
+
+    def test_dashboard_refresh_replaces_dirty_card_when_project_changes(self):
+        run_dashboard_js(
+            """
+            elements.runs = makeElement('runs');
+            elements.attention = makeElement('attention');
+            elements.stats = makeElement('stats');
+            elements.events = makeElement('events');
+            elements.health = makeElement('health');
+            elements['runs-title'] = makeElement('runs-title');
+            elements['project-back'] = makeElement('project-back');
+            elements['issue-tools'] = makeElement('issue-tools');
+            elements['issue-picker'] = makeElement('issue-picker');
+            vm.runInContext(`location.hash = '#project=' + encodeURIComponent('/other')`, context);
+            vm.runInContext(`markRunAiDirty(7, 'runs')`, context);
+            elements.runs.innerHTML = '<div id="wrong-project">unsaved</div>';
+            vm.runInContext(`fetchState = async () => ({
+              ai_models: [],
+              runs: [{ id: 8, state: 'ready', issue_number: 8, issue_title: 'Other project', project_path: '/other' }],
+              projects: [{ name: 'other', path: '/other', settings: {} }],
+              stats: { ready: 1 },
+              events: [],
+              scheduler: { paused: false }
+            })`, context);
+            await vm.runInContext(`refresh()`, context);
+            assert.notStrictEqual(elements.runs.innerHTML, '<div id="wrong-project">unsaved</div>');
+            assert(elements.runs.innerHTML.includes('Other project'), elements.runs.innerHTML);
+            assert.strictEqual(vm.runInContext(`hasDirtyRunAiInScope('runs')`, context), false);
+            """
+        )
+
     def test_dashboard_html_includes_restart_button(self):
         self.assertIn("Restart", HTML)
         self.assertIn("/api/actions/restart", HTML)

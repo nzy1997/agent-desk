@@ -1540,9 +1540,11 @@ class Scheduler:
         if record["state"] == "available":
             return self._ai_settings_fields_for_repo(repo)
         return {
-            "ai_model": str(record.get("ai_model") or DEFAULT_AI_MODEL),
+            "ai_model": str(record["ai_model"] if "ai_model" in record else DEFAULT_AI_MODEL),
             "ai_reasoning_effort": str(
-                record.get("ai_reasoning_effort") or DEFAULT_AI_REASONING_EFFORT
+                record["ai_reasoning_effort"]
+                if "ai_reasoning_effort" in record
+                else DEFAULT_AI_REASONING_EFFORT
             ),
         }
 

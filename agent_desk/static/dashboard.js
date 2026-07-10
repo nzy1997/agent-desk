@@ -662,6 +662,29 @@ function hasDirtyRunAiInScope(scope) {
   const suffix = `:${runAiScope(scope)}`;
   return Array.from(dirtyRunAiScopes).some(key => key.endsWith(suffix));
 }
+function runsRenderedInScope(state, scope) {
+  if (runAiScope(scope) === 'attention') {
+    return (state.runs || []).filter(run => needsAttention(run)).slice(0, 8);
+  }
+  const path = selectedProjectPath();
+  if (!path) return [];
+  return (state.runs || []).filter(run => run.project_path === path).slice(0, 24);
+}
+function reconcileRunAiDirtyScope(state, scope) {
+  const safeScope = runAiScope(scope);
+  const suffix = `:${safeScope}`;
+  const visible = new Map(
+    runsRenderedInScope(state, safeScope).map(run => [String(run.id), run])
+  );
+  Array.from(dirtyRunAiScopes).forEach(key => {
+    if (!key.endsWith(suffix)) return;
+    const runId = key.slice(0, -suffix.length);
+    const run = visible.get(runId);
+    if (!run || !canEditRunAiSettings(run)) {
+      dirtyRunAiScopes.delete(key);
+    }
+  });
+}
 function aiSettingsHtml(run, scope = 'runs') {
   const state = latestState || { ai_models: [] };
   const disabled = canEditRunAiSettings(run) ? '' : 'disabled';
@@ -824,9 +847,11 @@ async function refresh() {
   document.getElementById('stats').innerHTML = Object.entries(stats).sort().map(([key, value]) =>
     `<div class="metric-row"><span>${esc(key)}</span><strong>${value}</strong></div>`
   ).join('') || '<div class="muted">No runs yet</div>';
+  reconcileRunAiDirtyScope(state, 'runs');
   if (!hasDirtyRunAiInScope('runs')) {
     document.getElementById('runs').innerHTML = renderRuns(state);
   }
+  reconcileRunAiDirtyScope(state, 'attention');
   if (!hasDirtyRunAiInScope('attention')) {
     document.getElementById('attention').innerHTML = state.runs
       .filter(run => needsAttention(run))

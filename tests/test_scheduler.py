@@ -502,6 +502,46 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(run["ai_model"], "future-model")
         self.assertEqual(run["ai_reasoning_effort"], "warp")
 
+    def test_mark_issue_ready_preserves_empty_blocked_task_ai_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=RecordingGitHub(),
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=18,
+                issue_title="Blocked custom default",
+                issue_url="https://example.test/18",
+                branch_name="agent/issue-18-blocked-custom-default",
+            )
+            store.update_run(
+                run_id,
+                state="blocked",
+                stage="blocked",
+                ai_model="",
+                ai_reasoning_effort="",
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                default_ai_model="gpt-5.6-terra",
+                default_ai_reasoning_effort="high",
+            )
+
+            result = scheduler.mark_issue_ready("octo/one", 18)
+            run = store.get_run(run_id)
+
+        self.assertTrue(result.started)
+        self.assertEqual(run["state"], "ready")
+        self.assertEqual(run["ai_model"], "")
+        self.assertEqual(run["ai_reasoning_effort"], "")
+
     def test_unlock_ready_dependencies_preserves_waiting_task_ai_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
