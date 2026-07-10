@@ -21,6 +21,98 @@ from agent_desk.worker import (
 
 
 class WorkerTests(unittest.TestCase):
+    def test_worker_retries_reference_lock_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_path = root / "repo"
+            repo_path.mkdir()
+            config = AgentDeskConfig(data_dir=root / "data")
+            repo = RepoConfig(name="octo/example", local_path=repo_path, push_pr=False)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name=repo.name,
+                issue_number=20,
+                issue_title="Retry fetch",
+                issue_url="https://github.com/octo/example/issues/20",
+                branch_name="agent/issue-20-retry-fetch",
+            )
+            runner = FakeCommandRunner(
+                [
+                    CommandResult(
+                        ["git", "fetch"],
+                        1,
+                        "",
+                        "error: cannot lock ref 'refs/remotes/origin/main': "
+                        "is at new but expected old\n"
+                        "(unable to update local ref)",
+                    ),
+                    CommandResult(["git", "fetch"], 0, "", ""),
+                    CommandResult(["git", "worktree"], 0, "", ""),
+                    CommandResult(
+                        ["codex", "exec"],
+                        0,
+                        '{"status":"done","summary":"ok","tests":[],"questions":[]}',
+                        "",
+                    ),
+                ]
+            )
+
+            with patch("agent_desk.worker.time.sleep") as sleep:
+                result = Worker(config, store, runner).run_issue(
+                    run_id=run_id,
+                    repo=repo,
+                    issue_number=20,
+                    issue_title="Retry fetch",
+                    issue_body="Body",
+                    issue_url="https://github.com/octo/example/issues/20",
+                    branch_name="agent/issue-20-retry-fetch",
+                )
+
+            fetch_calls = [call for call in runner.calls if "fetch" in call.argv]
+            retry_events = [
+                event
+                for event in store.dashboard_state()["events"]
+                if event["run_id"] == run_id and event["event_type"] == "git-fetch-retry"
+            ]
+            self.assertEqual(result.status, "done")
+            self.assertEqual(store.get_run(run_id)["state"], "done")
+            self.assertEqual(len(fetch_calls), 2)
+            self.assertEqual(len(retry_events), 1)
+            sleep.assert_called_once_with(0.1)
+
+    def test_worker_does_not_retry_unrelated_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_path = root / "repo"
+            repo_path.mkdir()
+            config = AgentDeskConfig(data_dir=root / "data")
+            repo = RepoConfig(name="octo/example", local_path=repo_path, push_pr=False)
+            store = Store(root / "desk.sqlite")
+            run_id = store.create_run(
+                repo_name=repo.name,
+                issue_number=21,
+                issue_title="Fail fetch",
+                issue_url="https://github.com/octo/example/issues/21",
+                branch_name="agent/issue-21-fail-fetch",
+            )
+            runner = FakeCommandRunner(
+                [CommandResult(["git", "fetch"], 128, "", "fatal: Authentication failed")]
+            )
+
+            result = Worker(config, store, runner).run_issue(
+                run_id=run_id,
+                repo=repo,
+                issue_number=21,
+                issue_title="Fail fetch",
+                issue_body="Body",
+                issue_url="https://github.com/octo/example/issues/21",
+                branch_name="agent/issue-21-fail-fetch",
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(store.get_run(run_id)["last_error"], "git fetch failed")
+            self.assertEqual(len(runner.calls), 1)
+
     def test_worker_uses_run_id_directory_for_same_issue_number_across_repos(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

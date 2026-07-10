@@ -28,7 +28,7 @@
 - Consumes: `AgentDeskConfig.data_dir` and `RepoConfig.local_path` as `Path` values.
 - Produces: `repository_setup_lock(data_dir: Path, repo_path: Path) -> ContextManager[Path]` and `repository_setup_lock_path(data_dir: Path, repo_path: Path) -> Path`.
 
-- [ ] **Step 1: Write the failing cross-process lock test**
+- [x] **Step 1: Write the failing cross-process lock test**
 
 ```python
 import multiprocessing
@@ -83,13 +83,13 @@ class RepositorySetupLockTests(unittest.TestCase):
                     second.terminate()
 ```
 
-- [ ] **Step 2: Run the new test and verify RED**
+- [x] **Step 2: Run the new test and verify RED**
 
 Run: `python3 -m unittest tests.test_repository_setup -v`
 
 Expected: import failure because `agent_desk.repository_setup` does not exist.
 
-- [ ] **Step 3: Implement the lock helper**
+- [x] **Step 3: Implement the lock helper**
 
 ```python
 from __future__ import annotations
@@ -126,13 +126,13 @@ def repository_setup_lock(data_dir: Path, repo_path: Path) -> Iterator[Path]:
         handle.close()
 ```
 
-- [ ] **Step 4: Run the lock tests and verify GREEN**
+- [x] **Step 4: Run the lock tests and verify GREEN**
 
 Run: `python3 -m unittest tests.test_repository_setup -v`
 
 Expected: the second process remains blocked until the first releases the lock; all tests pass.
 
-- [ ] **Step 5: Commit the lock helper**
+- [x] **Step 5: Commit the lock helper**
 
 ```bash
 git add agent_desk/repository_setup.py tests/test_repository_setup.py
@@ -149,7 +149,7 @@ git commit -m "feat: serialize repository setup across workers"
 - Consumes: `repository_setup_lock`, `CommandRunner.run()`, and Git stderr.
 - Produces: `is_retryable_ref_lock_error(stderr: str) -> bool` and `Worker._fetch_base(repo, run_id, run_dir) -> CommandResult`.
 
-- [ ] **Step 1: Write failing worker retry tests**
+- [x] **Step 1: Write failing worker retry tests**
 
 ```python
 def test_worker_retries_reference_lock_fetch_failure(self):
@@ -245,13 +245,13 @@ def test_worker_does_not_retry_unrelated_fetch_failure(self):
         self.assertEqual(len(runner.calls), 1)
 ```
 
-- [ ] **Step 2: Run the worker tests and verify RED**
+- [x] **Step 2: Run the worker tests and verify RED**
 
 Run: `python3 -m unittest tests.test_worker.WorkerTests.test_worker_retries_reference_lock_fetch_failure tests.test_worker.WorkerTests.test_worker_does_not_retry_unrelated_fetch_failure -v`
 
 Expected: the first test fails because the worker immediately marks the run failed instead of consuming the successful retry result.
 
-- [ ] **Step 3: Add the retry classifier and fetch helper**
+- [x] **Step 3: Add the retry classifier and fetch helper**
 
 ```python
 GIT_FETCH_MAX_ATTEMPTS = 3
@@ -301,7 +301,7 @@ def _fetch_base(
     raise AssertionError("unreachable")
 ```
 
-- [ ] **Step 4: Hold the repository lock around fetch and worktree creation**
+- [x] **Step 4: Hold the repository lock around fetch and worktree creation**
 
 Replace the current fetch/worktree block in `Worker.run_issue()` with:
 
@@ -359,13 +359,13 @@ with repository_setup_lock(self.config.data_dir, repo.local_path):
 
 Release the context before changing the stage to `running codex`.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run: `python3 -m unittest tests.test_repository_setup tests.test_worker -v`
 
 Expected: all repository setup and worker tests pass.
 
-- [ ] **Step 6: Run repository verification**
+- [x] **Step 6: Run repository verification**
 
 Run: `make test`
 
@@ -375,7 +375,13 @@ Run: `ruff check . && ruff format --check .`
 
 Expected: both commands exit zero without modifying files.
 
-- [ ] **Step 7: Commit the worker integration**
+Observed baseline note: `make test` passed all 231 tests. Full-repository Ruff
+is not baseline-clean because `tests/test_dashboard.py:494` already contains an
+unused assignment and 27 pre-existing files do not match the currently resolved
+Ruff formatter. Scoped `ruff check` passed for all four Python files involved in
+this change, and `ruff format --check` passed for both newly created files.
+
+- [x] **Step 7: Commit the worker integration**
 
 ```bash
 git add agent_desk/worker.py tests/test_worker.py docs/superpowers/plans/2026-07-10-repository-setup-lock.md

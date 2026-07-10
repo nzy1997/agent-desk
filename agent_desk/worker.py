@@ -14,7 +14,12 @@ from typing import Any
 from .codex_activity import CodexThreadActivityMonitor
 from .config import AgentDeskConfig, RepoConfig
 from .prompt import render_worker_prompt
+from .repository_setup import repository_setup_lock
 from .store import Store
+
+
+GIT_FETCH_MAX_ATTEMPTS = 3
+GIT_FETCH_RETRY_DELAYS = (0.1, 0.25)
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,13 @@ class WorkerResult:
     pr_url: str
     decision_log: list[str]
     run_dir: Path
+
+
+def is_retryable_ref_lock_error(stderr: str) -> bool:
+    detail = str(stderr or "").lower()
+    return "cannot lock ref" in detail and (
+        "but expected" in detail or "unable to update local ref" in detail
+    )
 
 
 def is_codex_json_command(argv: Sequence[str]) -> bool:
@@ -294,35 +306,53 @@ class Worker:
             run_dir=str(run_dir),
             worktree_path=str(worktree_path),
         )
-        self.store.add_event(run_id, "info", "worktree", "Fetching base branch", {})
-
-        fetch = self.runner.run(
-            ["git", "-C", str(repo.local_path), "fetch", "origin", repo.base_branch],
-            stdout_path=run_dir / "git-fetch.stdout.log",
-            stderr_path=run_dir / "git-fetch.stderr.log",
+        self.store.add_event(
+            run_id,
+            "info",
+            "repository-setup-lock",
+            "Waiting for repository setup lock",
+            {"path": str(repo.local_path)},
         )
-        if fetch.returncode != 0:
-            return self._fail(run_id, run_dir, "failed", "git fetch failed", fetch.stderr)
+        with repository_setup_lock(self.config.data_dir, repo.local_path):
+            self.store.add_event(
+                run_id,
+                "info",
+                "repository-setup-lock",
+                "Acquired repository setup lock",
+                {"path": str(repo.local_path)},
+            )
+            self.store.add_event(run_id, "info", "worktree", "Fetching base branch", {})
+            fetch = self._fetch_base(repo, run_id, run_dir)
+            if fetch.returncode != 0:
+                return self._fail(run_id, run_dir, "failed", "git fetch failed", fetch.stderr)
 
-        worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        self.store.add_event(run_id, "info", "worktree", "Creating worktree", {"path": str(worktree_path)})
-        add = self.runner.run(
-            [
-                "git",
-                "-C",
-                str(repo.local_path),
+            worktree_path.parent.mkdir(parents=True, exist_ok=True)
+            self.store.add_event(
+                run_id,
+                "info",
                 "worktree",
-                "add",
-                "-b",
-                branch_name,
-                str(worktree_path),
-                f"origin/{repo.base_branch}",
-            ],
-            stdout_path=run_dir / "git-worktree.stdout.log",
-            stderr_path=run_dir / "git-worktree.stderr.log",
-        )
-        if add.returncode != 0:
-            return self._fail(run_id, run_dir, "failed", "git worktree add failed", add.stderr)
+                "Creating worktree",
+                {"path": str(worktree_path)},
+            )
+            add = self.runner.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo.local_path),
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch_name,
+                    str(worktree_path),
+                    f"origin/{repo.base_branch}",
+                ],
+                stdout_path=run_dir / "git-worktree.stdout.log",
+                stderr_path=run_dir / "git-worktree.stderr.log",
+            )
+            if add.returncode != 0:
+                return self._fail(
+                    run_id, run_dir, "failed", "git worktree add failed", add.stderr
+                )
 
         self.store.update_run(run_id, stage="running codex")
         self.store.add_event(run_id, "info", "codex", "Starting codex exec", {})
@@ -423,6 +453,38 @@ class Worker:
         )
 
         return result
+
+    def _fetch_base(
+        self, repo: RepoConfig, run_id: int, run_dir: Path
+    ) -> CommandResult:
+        for attempt in range(1, GIT_FETCH_MAX_ATTEMPTS + 1):
+            fetch = self.runner.run(
+                ["git", "-C", str(repo.local_path), "fetch", "origin", repo.base_branch],
+                stdout_path=run_dir / "git-fetch.stdout.log",
+                stderr_path=run_dir / "git-fetch.stderr.log",
+            )
+            if (
+                fetch.returncode == 0
+                or not is_retryable_ref_lock_error(fetch.stderr)
+                or attempt == GIT_FETCH_MAX_ATTEMPTS
+            ):
+                return fetch
+            delay = GIT_FETCH_RETRY_DELAYS[attempt - 1]
+            self.store.add_event(
+                run_id,
+                "warning",
+                "git-fetch-retry",
+                "Retrying git fetch after reference lock conflict",
+                {
+                    "attempt": attempt,
+                    "next_attempt": attempt + 1,
+                    "max_attempts": GIT_FETCH_MAX_ATTEMPTS,
+                    "delay_seconds": delay,
+                    "detail": fetch.stderr[-4000:],
+                },
+            )
+            time.sleep(delay)
+        raise AssertionError("unreachable")
 
     def _worktree_path(self, repo: RepoConfig, issue_number: int, branch_name: str, attempt: int) -> Path:
         repo_slug = slugify(repo.name)
