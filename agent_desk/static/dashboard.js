@@ -652,6 +652,9 @@ function runAiDirtyKey(runId, scope) {
 function runAiElementId(kind, runId, scope) {
   return `run-ai-${kind}-${runId}-${runAiScope(scope)}`;
 }
+function runAiCardId(runId, scope) {
+  return `run-card-${runId}-${runAiScope(scope)}`;
+}
 function markRunAiDirty(runId, scope) {
   dirtyRunAiScopes.add(runAiDirtyKey(runId, scope));
 }
@@ -785,12 +788,13 @@ function runActions(run) {
   return '';
 }
 function runHtml(run, scope = 'runs') {
-  return `<div class="run">
+  const safeScope = runAiScope(scope);
+  return `<div class="run" id="${runAiCardId(run.id, safeScope)}">
     <strong>#${run.issue_number} ${esc(run.issue_title)}</strong>
     <div class="muted">${esc(run.repo_name)} · ${esc(run.branch_name)}</div>
     <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
     <div>Stage: ${esc(run.stage)}</div>
-    ${aiSettingsHtml(run, scope)}
+    ${aiSettingsHtml(run, safeScope)}
     ${dependencyEdgesHtml(run)}
     ${blockedDependenciesHtml(run)}
     ${dependencyOverridesHtml(run)}
@@ -801,6 +805,17 @@ function runHtml(run, scope = 'runs') {
     ${runActions(run)}
     ${logLinks(run)}
   </div>`;
+}
+function renderRunCard(run, scope = 'runs') {
+  const safeScope = runAiScope(scope);
+  if (dirtyRunAiScopes.has(runAiDirtyKey(run.id, safeScope))) {
+    const existing = document.getElementById(runAiCardId(run.id, safeScope));
+    if (existing && existing.outerHTML) return existing.outerHTML;
+  }
+  return runHtml(run, safeScope);
+}
+function renderRunCards(runs, scope, emptyHtml) {
+  return runs.map(run => renderRunCard(run, scope)).join('') || emptyHtml;
 }
 function stateCounts(runs) {
   return runs.reduce((counts, run) => {
@@ -831,7 +846,7 @@ function renderSelectedProject(state, path) {
   const runs = state.runs.filter(run => run.project_path === path);
   document.getElementById('runs-title').textContent = project ? project.name : 'Tasks';
   document.getElementById('project-back').style.display = '';
-  return runs.slice(0, 24).map(run => runHtml(run, 'runs')).join('') || '<div class="muted">No tasks in this folder</div>';
+  return renderRunCards(runs.slice(0, 24), 'runs', '<div class="muted">No tasks in this folder</div>');
 }
 function renderRuns(state) {
   const path = selectedProjectPath();
@@ -848,15 +863,13 @@ async function refresh() {
     `<div class="metric-row"><span>${esc(key)}</span><strong>${value}</strong></div>`
   ).join('') || '<div class="muted">No runs yet</div>';
   reconcileRunAiDirtyScope(state, 'runs');
-  if (!hasDirtyRunAiInScope('runs')) {
-    document.getElementById('runs').innerHTML = renderRuns(state);
-  }
+  document.getElementById('runs').innerHTML = renderRuns(state);
   reconcileRunAiDirtyScope(state, 'attention');
-  if (!hasDirtyRunAiInScope('attention')) {
-    document.getElementById('attention').innerHTML = state.runs
-      .filter(run => needsAttention(run))
-      .slice(0, 8).map(run => runHtml(run, 'attention')).join('') || '<div class="muted">Nothing needs you</div>';
-  }
+  document.getElementById('attention').innerHTML = renderRunCards(
+    state.runs.filter(run => needsAttention(run)).slice(0, 8),
+    'attention',
+    '<div class="muted">Nothing needs you</div>'
+  );
   document.getElementById('events').innerHTML = state.events.slice(0, 20).map(event =>
     `<div class="event ${esc(event.level)}">
       <div><strong>${esc(event.message)}</strong></div>

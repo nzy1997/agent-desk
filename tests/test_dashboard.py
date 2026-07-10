@@ -783,7 +783,8 @@ class DashboardTests(unittest.TestCase):
             }`, context);
             vm.runInContext(`location.hash = '#project=' + encodeURIComponent('/repo')`, context);
             vm.runInContext(`markRunAiDirty(7, 'runs')`, context);
-            elements.runs.innerHTML = '<div id="keep-runs">unsaved</div>';
+            elements['run-card-7-runs'] = makeElement('run-card-7-runs');
+            elements['run-card-7-runs'].outerHTML = '<div id="keep-runs">unsaved</div>';
             elements.attention.innerHTML = '<div id="keep-attention">unsaved</div>';
             vm.runInContext(`fetchState = async () => ({
               ai_models: [],
@@ -796,6 +797,41 @@ class DashboardTests(unittest.TestCase):
             await vm.runInContext(`refresh()`, context);
             assert.strictEqual(elements.runs.innerHTML, '<div id="keep-runs">unsaved</div>');
             assert.notStrictEqual(elements.attention.innerHTML, '<div id="keep-attention">unsaved</div>');
+            """
+        )
+
+    def test_dashboard_refresh_updates_sibling_cards_while_one_ai_card_is_dirty(self):
+        run_dashboard_js(
+            """
+            elements.runs = makeElement('runs');
+            elements.attention = makeElement('attention');
+            elements.stats = makeElement('stats');
+            elements.events = makeElement('events');
+            elements.health = makeElement('health');
+            elements['runs-title'] = makeElement('runs-title');
+            elements['project-back'] = makeElement('project-back');
+            elements['issue-tools'] = makeElement('issue-tools');
+            elements['issue-picker'] = makeElement('issue-picker');
+            vm.runInContext(`location.hash = '#project=' + encodeURIComponent('/repo')`, context);
+            vm.runInContext(`markRunAiDirty(7, 'runs')`, context);
+            elements['run-card-7-runs'] = makeElement('run-card-7-runs');
+            elements['run-card-7-runs'].outerHTML = '<div id="keep-runs">unsaved</div>';
+            vm.runInContext(`fetchState = async () => ({
+              ai_models: [],
+              runs: [
+                { id: 7, state: 'blocked', issue_number: 7, issue_title: 'Dirty card', project_path: '/repo' },
+                { id: 8, state: 'running', issue_number: 8, issue_title: 'Sibling started', project_path: '/repo' }
+              ],
+              projects: [{ name: 'repo', path: '/repo', settings: {} }],
+              stats: { blocked: 1, running: 1 },
+              events: [],
+              scheduler: { paused: false }
+            })`, context);
+            await vm.runInContext(`refresh()`, context);
+            assert(elements.runs.innerHTML.includes('<div id="keep-runs">unsaved</div>'), elements.runs.innerHTML);
+            assert(elements.runs.innerHTML.includes('Sibling started'), elements.runs.innerHTML);
+            assert(elements.runs.innerHTML.includes('running'), elements.runs.innerHTML);
+            assert.strictEqual(vm.runInContext(`hasDirtyRunAiInScope('runs')`, context), true);
             """
         )
 
