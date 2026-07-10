@@ -1,7 +1,9 @@
 import json
 import socket
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 import urllib.error
@@ -22,6 +24,74 @@ from agent_desk.dashboard import (
 from agent_desk.dependencies import Dependency, DependencyGraph, IssueDependencies
 from agent_desk.scheduler import RunNextResult, Scheduler
 from agent_desk.store import Store
+
+
+def run_dashboard_js(script: str) -> str:
+    source = Path("agent_desk/static/dashboard.js").read_text(encoding="utf-8")
+    source = source.replace(
+        "\nrefresh();\nwindow.addEventListener('hashchange', refresh);\nsetInterval(refresh, 2000);\n",
+        "\n",
+    )
+    harness = f"""
+const assert = require('assert');
+const vm = require('vm');
+const source = {json.dumps(source)};
+const elements = {{}};
+function makeElement(id) {{
+  return {{
+    id,
+    innerHTML: '',
+    value: '',
+    checked: false,
+    disabled: false,
+    textContent: '',
+    style: {{}},
+    dataset: {{}},
+    querySelectorAll() {{ return []; }}
+  }};
+}}
+const context = {{
+  console,
+  JSON,
+  Number,
+  String,
+  encodeURIComponent,
+  decodeURIComponent,
+  history: {{ pushState() {{}} }},
+  location: {{ hash: '', pathname: '/', search: '' }},
+  navigator: {{ clipboard: {{ writeText: async () => {{}} }} }},
+  alert() {{}},
+  confirm() {{ return true; }},
+  prompt() {{ return null; }},
+  setInterval() {{}},
+  fetch: async () => ({{ ok: true, json: async () => ({{}}), text: async () => '' }}),
+  window: {{ addEventListener() {{}} }},
+  document: {{
+    getElementById(id) {{
+      if (!elements[id]) elements[id] = makeElement(id);
+      return elements[id];
+    }}
+  }},
+  elements
+}};
+context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context);
+(async () => {{
+{textwrap.indent(script, "  ")}
+}})().catch(error => {{
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+}});
+"""
+    completed = subprocess.run(
+        ["node", "-e", harness],
+        cwd=Path(__file__).resolve().parent.parent,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return completed.stdout
 
 
 class _IncludeIssueGitHub:
@@ -610,13 +680,124 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("default_ai_reasoning_effort", HTML)
 
     def test_dashboard_html_renders_task_ai_settings_controls(self):
-        self.assertIn("aiSettingsHtml(run)", HTML)
+        self.assertIn("aiSettingsHtml(run, scope", HTML)
         self.assertIn("/api/run/${runId}/ai-settings", HTML)
         self.assertIn("saveRunAiSettings(", HTML)
 
     def test_dashboard_model_options_do_not_offer_unsavable_custom_choice(self):
         self.assertNotIn("Custom...", HTML)
-        self.assertIn("const unknownSelected = selected && !aiOption(state, selected)", HTML)
+        self.assertIn('list="default-ai-model-options"', HTML)
+        self.assertIn('list="default-ai-reasoning-options"', HTML)
+
+    def test_dashboard_ai_controls_accept_custom_model_and_effort_values(self):
+        run_dashboard_js(
+            """
+            vm.runInContext(`latestState = {
+              ai_models: [{
+                id: 'gpt-5.5',
+                label: 'GPT-5.5',
+                default_reasoning_effort: 'medium',
+                reasoning_efforts: ['low', 'medium', 'high', 'xhigh']
+              }]
+            }`, context);
+            const html = vm.runInContext(`aiSettingsHtml({
+              id: 42,
+              state: 'ready',
+              ai_model: 'gpt-new-preview',
+              ai_reasoning_effort: 'warp'
+            }, 'runs')`, context);
+            assert(html.includes('value="gpt-new-preview"'), html);
+            assert(html.includes('value="warp"'), html);
+            assert(html.includes('list="run-ai-model-options-42-runs"'), html);
+            assert(html.includes('list="run-ai-reasoning-options-42-runs"'), html);
+            """
+        )
+
+    def test_dashboard_ai_control_ids_include_render_scope(self):
+        run_dashboard_js(
+            """
+            vm.runInContext(`latestState = {
+              ai_models: [{
+                id: 'gpt-5.5',
+                label: 'GPT-5.5',
+                default_reasoning_effort: 'medium',
+                reasoning_efforts: ['low', 'medium', 'high', 'xhigh']
+              }]
+            }`, context);
+            const run = { id: 7, state: 'blocked', ai_model: 'gpt-5.5', ai_reasoning_effort: 'high' };
+            const runsHtml = vm.runInContext(`aiSettingsHtml(${JSON.stringify(run)}, 'runs')`, context);
+            const attentionHtml = vm.runInContext(`aiSettingsHtml(${JSON.stringify(run)}, 'attention')`, context);
+            assert(runsHtml.includes('id="run-ai-model-7-runs"'), runsHtml);
+            assert(attentionHtml.includes('id="run-ai-model-7-attention"'), attentionHtml);
+            assert(runsHtml.includes('saveRunAiSettings(7, &quot;runs&quot;)'), runsHtml);
+            assert(attentionHtml.includes('saveRunAiSettings(7, &quot;attention&quot;)'), attentionHtml);
+            """
+        )
+
+    def test_dashboard_save_run_ai_settings_reads_matching_render_scope(self):
+        run_dashboard_js(
+            """
+            vm.runInContext(`latestState = { ai_models: [] }`, context);
+            vm.runInContext(`refresh = async () => { globalThis.refreshed = true; }`, context);
+            vm.runInContext(`fetch = async (path, options) => {
+              globalThis.savedPath = path;
+              globalThis.savedBody = JSON.parse(options.body);
+              return { ok: true, text: async () => '' };
+            }`, context);
+            elements['run-ai-model-7-runs'] = makeElement('run-ai-model-7-runs');
+            elements['run-ai-reasoning-7-runs'] = makeElement('run-ai-reasoning-7-runs');
+            elements['run-ai-model-7-attention'] = makeElement('run-ai-model-7-attention');
+            elements['run-ai-reasoning-7-attention'] = makeElement('run-ai-reasoning-7-attention');
+            elements['run-ai-model-7-runs'].value = 'wrong-model';
+            elements['run-ai-reasoning-7-runs'].value = 'wrong-effort';
+            elements['run-ai-model-7-attention'].value = 'custom-attention-model';
+            elements['run-ai-reasoning-7-attention'].value = 'custom-attention-effort';
+            await vm.runInContext(`saveRunAiSettings(7, 'attention')`, context);
+            assert.strictEqual(context.savedPath, '/api/run/7/ai-settings');
+            assert.deepStrictEqual(context.savedBody, {
+              ai_model: 'custom-attention-model',
+              ai_reasoning_effort: 'custom-attention-effort'
+            });
+            """
+        )
+
+    def test_dashboard_refresh_preserves_dirty_task_ai_card_dom(self):
+        run_dashboard_js(
+            """
+            elements.runs = makeElement('runs');
+            elements.attention = makeElement('attention');
+            elements.stats = makeElement('stats');
+            elements.events = makeElement('events');
+            elements.health = makeElement('health');
+            elements['runs-title'] = makeElement('runs-title');
+            elements['project-back'] = makeElement('project-back');
+            elements['issue-tools'] = makeElement('issue-tools');
+            elements['issue-picker'] = makeElement('issue-picker');
+            vm.runInContext(`latestState = {
+              ai_models: [],
+              runs: [{ id: 7, state: 'blocked', issue_number: 7, project_path: '/repo' }],
+              projects: [{ name: 'repo', path: '/repo', settings: {} }],
+              stats: {},
+              events: [],
+              scheduler: { paused: false }
+            }`, context);
+            vm.runInContext(`location.hash = '#project=' + encodeURIComponent('/repo')`, context);
+            vm.runInContext(`markRunAiDirty(7, 'runs')`, context);
+            elements.runs.innerHTML = '<div id="keep-runs">unsaved</div>';
+            elements.attention.innerHTML = '<div id="keep-attention">unsaved</div>';
+            vm.runInContext(`fetchState = async () => ({
+              ai_models: [],
+              runs: [{ id: 7, state: 'blocked', issue_number: 7, project_path: '/repo' }],
+              projects: [{ name: 'repo', path: '/repo', settings: {} }],
+              stats: { blocked: 1 },
+              events: [],
+              scheduler: { paused: false }
+            })`, context);
+            await vm.runInContext(`refresh()`, context);
+            assert.strictEqual(elements.runs.innerHTML, '<div id="keep-runs">unsaved</div>');
+            assert.notStrictEqual(elements.attention.innerHTML, '<div id="keep-attention">unsaved</div>');
+            """
+        )
 
     def test_dashboard_html_includes_restart_button(self):
         self.assertIn("Restart", HTML)

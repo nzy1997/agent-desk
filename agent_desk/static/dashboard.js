@@ -4,6 +4,7 @@ let currentRepoName = '';
 let pickerRepo = null;
 let issuesLoading = false;
 let latestState = null;
+const dirtyRunAiScopes = new Set();
 async function fetchState() {
   const res = await fetch('/api/state');
   return await res.json();
@@ -85,22 +86,23 @@ function aiCatalog(state) {
 function aiOption(state, model) {
   return aiCatalog(state).find(item => item.id === model);
 }
-function modelOptionsHtml(state, selected) {
-  const options = aiCatalog(state).map(item =>
-    `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(item.label || item.id)}</option>`
+function modelOptionsHtml(state) {
+  return aiCatalog(state).map(item =>
+    `<option value="${esc(item.id)}">${esc(item.label || item.id)}</option>`
   ).join('');
-  const unknownSelected = selected && !aiOption(state, selected)
-    ? `<option value="${esc(selected)}" selected>${esc(selected)}</option>`
-    : '';
-  return `${options}${unknownSelected}`;
 }
-function reasoningOptionsHtml(state, model, selected) {
+function reasoningOptionsHtml(state, model) {
   const option = aiOption(state, model);
   const efforts = option ? option.reasoning_efforts || [] : ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-  const current = selected || (option ? option.default_reasoning_effort : 'xhigh');
   return efforts.map(effort =>
-    `<option value="${esc(effort)}" ${effort === current ? 'selected' : ''}>${esc(effort)}</option>`
+    `<option value="${esc(effort)}">${esc(effort)}</option>`
   ).join('');
+}
+function reasoningValueForModelChange(state, model, current) {
+  const option = aiOption(state, model);
+  if (!option) return current || 'xhigh';
+  const efforts = option.reasoning_efforts || [];
+  return efforts.includes(current) ? current : (option.default_reasoning_effort || 'xhigh');
 }
 function jsString(value) {
   // Produce a JS string literal that is also safe inside a double-quoted HTML
@@ -493,12 +495,11 @@ function renderSettings(state) {
   document.getElementById('worker-timeout-hours').value = Number.isInteger(timeoutHours)
     ? String(timeoutHours)
     : String(Math.round(timeoutHours * 100) / 100);
-  document.getElementById('default-ai-model').innerHTML = modelOptionsHtml(state, settings.default_ai_model || 'gpt-5.5');
+  document.getElementById('default-ai-model-options').innerHTML = modelOptionsHtml(state);
   document.getElementById('default-ai-model').value = settings.default_ai_model || 'gpt-5.5';
-  document.getElementById('default-ai-reasoning-effort').innerHTML = reasoningOptionsHtml(
+  document.getElementById('default-ai-reasoning-options').innerHTML = reasoningOptionsHtml(
     state,
-    settings.default_ai_model || 'gpt-5.5',
-    settings.default_ai_reasoning_effort || 'xhigh'
+    settings.default_ai_model || 'gpt-5.5'
   );
   document.getElementById('default-ai-reasoning-effort').value = settings.default_ai_reasoning_effort || 'xhigh';
   document.getElementById('requires-human-review').checked = settings.requires_human_review !== false;
@@ -509,11 +510,10 @@ function renderSettings(state) {
 function onWorkspaceModelChange() {
   const state = latestState || { ai_models: [] };
   const model = document.getElementById('default-ai-model').value;
-  const option = aiOption(state, model);
-  const effort = option ? option.default_reasoning_effort : 'xhigh';
-  const select = document.getElementById('default-ai-reasoning-effort');
-  select.innerHTML = reasoningOptionsHtml(state, model, effort);
-  select.value = effort;
+  const input = document.getElementById('default-ai-reasoning-effort');
+  const effort = reasoningValueForModelChange(state, model, input.value || 'xhigh');
+  document.getElementById('default-ai-reasoning-options').innerHTML = reasoningOptionsHtml(state, model);
+  input.value = effort;
 }
 async function saveSettings() {
   const path = selectedProjectPath();
@@ -643,38 +643,79 @@ function needsAttention(run) {
 function canEditRunAiSettings(run) {
   return run.state !== 'running';
 }
-function aiSettingsHtml(run) {
+function runAiScope(scope) {
+  return String(scope || 'runs').replace(/[^a-zA-Z0-9_-]/g, '-');
+}
+function runAiDirtyKey(runId, scope) {
+  return `${runId}:${runAiScope(scope)}`;
+}
+function runAiElementId(kind, runId, scope) {
+  return `run-ai-${kind}-${runId}-${runAiScope(scope)}`;
+}
+function markRunAiDirty(runId, scope) {
+  dirtyRunAiScopes.add(runAiDirtyKey(runId, scope));
+}
+function clearRunAiDirty(runId, scope) {
+  dirtyRunAiScopes.delete(runAiDirtyKey(runId, scope));
+}
+function hasDirtyRunAiInScope(scope) {
+  const suffix = `:${runAiScope(scope)}`;
+  return Array.from(dirtyRunAiScopes).some(key => key.endsWith(suffix));
+}
+function aiSettingsHtml(run, scope = 'runs') {
   const state = latestState || { ai_models: [] };
   const disabled = canEditRunAiSettings(run) ? '' : 'disabled';
   const model = run.ai_model || 'gpt-5.5';
   const effort = run.ai_reasoning_effort || 'xhigh';
+  const safeScope = runAiScope(scope);
+  const modelId = runAiElementId('model', run.id, safeScope);
+  const modelOptionsId = runAiElementId('model-options', run.id, safeScope);
+  const reasoningId = runAiElementId('reasoning', run.id, safeScope);
+  const reasoningOptionsId = runAiElementId('reasoning-options', run.id, safeScope);
+  const dirty = canEditRunAiSettings(run)
+    ? `oninput="markRunAiDirty(${run.id}, ${jsString(safeScope)})" onchange="onRunModelChange(${run.id}, ${jsString(safeScope)})"`
+    : '';
+  const effortDirty = canEditRunAiSettings(run)
+    ? `oninput="markRunAiDirty(${run.id}, ${jsString(safeScope)})" onchange="markRunAiDirty(${run.id}, ${jsString(safeScope)})"`
+    : '';
   return `<div class="ai-settings">
     <span>AI</span>
-    <select id="run-ai-model-${run.id}" ${disabled} onchange="onRunModelChange(${run.id})">
-      ${modelOptionsHtml(state, model)}
-    </select>
-    <select id="run-ai-reasoning-${run.id}" ${disabled}>
-      ${reasoningOptionsHtml(state, model, effort)}
-    </select>
-    ${canEditRunAiSettings(run) ? `<button onclick="saveRunAiSettings(${run.id})">Save</button>` : '<span class="muted">running</span>'}
+    <input id="${modelId}" list="${modelOptionsId}" value="${esc(model)}" ${disabled} ${dirty}>
+    <datalist id="${modelOptionsId}">${modelOptionsHtml(state)}</datalist>
+    <input id="${reasoningId}" list="${reasoningOptionsId}" value="${esc(effort)}" ${disabled} ${effortDirty}>
+    <datalist id="${reasoningOptionsId}">${reasoningOptionsHtml(state, model)}</datalist>
+    ${canEditRunAiSettings(run) ? `<button onclick="saveRunAiSettings(${run.id}, ${jsString(safeScope)})">Save</button>` : '<span class="muted">running</span>'}
   </div>`;
 }
-function onRunModelChange(runId) {
+function onRunModelChange(runId, scope = 'runs') {
   const state = latestState || { ai_models: [] };
-  const modelSelect = document.getElementById(`run-ai-model-${runId}`);
-  const reasoningSelect = document.getElementById(`run-ai-reasoning-${runId}`);
-  const option = aiOption(state, modelSelect.value);
-  const effort = option ? option.default_reasoning_effort : (reasoningSelect.value || 'xhigh');
-  reasoningSelect.innerHTML = reasoningOptionsHtml(state, modelSelect.value, effort);
-  reasoningSelect.value = effort;
+  const modelInput = document.getElementById(runAiElementId('model', runId, scope));
+  const reasoningInput = document.getElementById(runAiElementId('reasoning', runId, scope));
+  const options = document.getElementById(runAiElementId('reasoning-options', runId, scope));
+  const effort = reasoningValueForModelChange(state, modelInput.value, reasoningInput.value || 'xhigh');
+  options.innerHTML = reasoningOptionsHtml(state, modelInput.value);
+  reasoningInput.value = effort;
+  markRunAiDirty(runId, scope);
 }
-async function saveRunAiSettings(runId) {
-  const model = document.getElementById(`run-ai-model-${runId}`).value;
-  const effort = document.getElementById(`run-ai-reasoning-${runId}`).value;
-  return postJson(`/api/run/${runId}/ai-settings`, {
-    ai_model: model,
-    ai_reasoning_effort: effort
-  });
+async function saveRunAiSettings(runId, scope = 'runs') {
+  const model = document.getElementById(runAiElementId('model', runId, scope)).value;
+  const effort = document.getElementById(runAiElementId('reasoning', runId, scope)).value;
+  try {
+    const res = await fetch(`/api/run/${runId}/ai-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ai_model: model,
+        ai_reasoning_effort: effort
+      })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    clearRunAiDirty(runId, scope);
+    await refresh();
+  } catch (error) {
+    markRunAiDirty(runId, scope);
+    throw error;
+  }
 }
 function runActions(run) {
   if (run.state === 'running') {
@@ -720,13 +761,13 @@ function runActions(run) {
   }
   return '';
 }
-function runHtml(run) {
+function runHtml(run, scope = 'runs') {
   return `<div class="run">
     <strong>#${run.issue_number} ${esc(run.issue_title)}</strong>
     <div class="muted">${esc(run.repo_name)} · ${esc(run.branch_name)}</div>
     <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
     <div>Stage: ${esc(run.stage)}</div>
-    ${aiSettingsHtml(run)}
+    ${aiSettingsHtml(run, scope)}
     ${dependencyEdgesHtml(run)}
     ${blockedDependenciesHtml(run)}
     ${dependencyOverridesHtml(run)}
@@ -767,7 +808,7 @@ function renderSelectedProject(state, path) {
   const runs = state.runs.filter(run => run.project_path === path);
   document.getElementById('runs-title').textContent = project ? project.name : 'Tasks';
   document.getElementById('project-back').style.display = '';
-  return runs.slice(0, 24).map(runHtml).join('') || '<div class="muted">No tasks in this folder</div>';
+  return runs.slice(0, 24).map(run => runHtml(run, 'runs')).join('') || '<div class="muted">No tasks in this folder</div>';
 }
 function renderRuns(state) {
   const path = selectedProjectPath();
@@ -783,10 +824,14 @@ async function refresh() {
   document.getElementById('stats').innerHTML = Object.entries(stats).sort().map(([key, value]) =>
     `<div class="metric-row"><span>${esc(key)}</span><strong>${value}</strong></div>`
   ).join('') || '<div class="muted">No runs yet</div>';
-  document.getElementById('runs').innerHTML = renderRuns(state);
-  document.getElementById('attention').innerHTML = state.runs
-    .filter(run => needsAttention(run))
-    .slice(0, 8).map(runHtml).join('') || '<div class="muted">Nothing needs you</div>';
+  if (!hasDirtyRunAiInScope('runs')) {
+    document.getElementById('runs').innerHTML = renderRuns(state);
+  }
+  if (!hasDirtyRunAiInScope('attention')) {
+    document.getElementById('attention').innerHTML = state.runs
+      .filter(run => needsAttention(run))
+      .slice(0, 8).map(run => runHtml(run, 'attention')).join('') || '<div class="muted">Nothing needs you</div>';
+  }
   document.getElementById('events').innerHTML = state.events.slice(0, 20).map(event =>
     `<div class="event ${esc(event.level)}">
       <div><strong>${esc(event.message)}</strong></div>

@@ -1131,7 +1131,7 @@ class Scheduler:
         number = int(record["issue_number"])
         title = str(record.get("issue_title") or f"Issue {number}")
         branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
-        update_fields = {**self._ai_settings_fields_for_repo(repo), **fields}
+        update_fields = {**self._ai_settings_fields_for_record(repo, record), **fields}
         self.store.update_run(
             record["id"],
             state="ready",
@@ -1146,7 +1146,7 @@ class Scheduler:
         number = int(record["issue_number"])
         title = str(record.get("issue_title") or f"Issue {number}")
         branch = f"agent/issue-{number}-{slugify(title)[:48]}-run-{int(record.get('attempt', 1))}"
-        update_fields = {**self._ai_settings_fields_for_repo(repo), **fields}
+        update_fields = {**self._ai_settings_fields_for_record(repo, record), **fields}
         self.store.update_run(
             record["id"],
             state=DEPENDENCY_WAITING_STATE,
@@ -1535,6 +1535,16 @@ class Scheduler:
             settings.default_ai_reasoning_effort,
         )
         return {"ai_model": model, "ai_reasoning_effort": effort}
+
+    def _ai_settings_fields_for_record(self, repo: RepoConfig, record: dict) -> dict[str, str]:
+        if record["state"] == "available":
+            return self._ai_settings_fields_for_repo(repo)
+        return {
+            "ai_model": str(record.get("ai_model") or DEFAULT_AI_MODEL),
+            "ai_reasoning_effort": str(
+                record.get("ai_reasoning_effort") or DEFAULT_AI_REASONING_EFFORT
+            ),
+        }
 
     def _config_for_repo(self, repo: RepoConfig) -> AgentDeskConfig:
         timeout = self._settings_for_repo(repo).worker_timeout_seconds

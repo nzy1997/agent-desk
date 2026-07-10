@@ -462,6 +462,89 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(run["ai_model"], "gpt-5.6-terra")
         self.assertEqual(run["ai_reasoning_effort"], "high")
 
+    def test_mark_issue_ready_preserves_blocked_task_ai_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=RecordingGitHub(),
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="Blocked retry",
+                issue_url="https://example.test/8",
+                branch_name="agent/issue-8-blocked-retry",
+            )
+            store.update_run(
+                run_id,
+                state="blocked",
+                stage="blocked",
+                ai_model="future-model",
+                ai_reasoning_effort="warp",
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                default_ai_model="gpt-5.6-terra",
+                default_ai_reasoning_effort="high",
+            )
+
+            result = scheduler.mark_issue_ready("octo/one", 8)
+            run = store.get_run(run_id)
+
+        self.assertTrue(result.started)
+        self.assertEqual(run["state"], "ready")
+        self.assertEqual(run["ai_model"], "future-model")
+        self.assertEqual(run["ai_reasoning_effort"], "warp")
+
+    def test_unlock_ready_dependencies_preserves_waiting_task_ai_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=RecordingGitHub(),
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=9,
+                issue_title="Dependency retry",
+                issue_url="https://example.test/9",
+                branch_name="agent/issue-9-dependency-retry",
+            )
+            store.update_run(
+                run_id,
+                state="waiting_dependencies",
+                stage="waiting for dependencies",
+                dependencies=[],
+                blocked_by=[{"repo": "octo/one", "number": 1, "state": "done"}],
+                dependency_state="blocked",
+                ai_model="custom-model",
+                ai_reasoning_effort="ultra-plus",
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                default_ai_model="gpt-5.6-sol",
+                default_ai_reasoning_effort="max",
+            )
+
+            results = scheduler.unlock_ready_dependencies()
+            run = store.get_run(run_id)
+
+        self.assertEqual([result.run_id for result in results], [run_id])
+        self.assertEqual(run["state"], "ready")
+        self.assertEqual(run["ai_model"], "custom-model")
+        self.assertEqual(run["ai_reasoning_effort"], "ultra-plus")
+
     def test_remove_issue_from_desk_returns_ready_issue_to_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

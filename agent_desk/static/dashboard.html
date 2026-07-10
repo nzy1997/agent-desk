@@ -157,6 +157,7 @@
       font: inherit;
     }
     .setting-row select,
+    .setting-row input[list],
     .ai-settings select,
     .ai-settings input {
       min-width: 112px;
@@ -428,11 +429,13 @@
         </label>
         <label class="setting-row" for="default-ai-model">
           <span>Default model</span>
-          <select id="default-ai-model" onchange="onWorkspaceModelChange(); markSettingsDirty()"></select>
+          <input id="default-ai-model" list="default-ai-model-options" onchange="onWorkspaceModelChange(); markSettingsDirty()" oninput="markSettingsDirty()">
+          <datalist id="default-ai-model-options"></datalist>
         </label>
         <label class="setting-row" for="default-ai-reasoning-effort">
           <span>Default reasoning</span>
-          <select id="default-ai-reasoning-effort" onchange="markSettingsDirty()"></select>
+          <input id="default-ai-reasoning-effort" list="default-ai-reasoning-options" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+          <datalist id="default-ai-reasoning-options"></datalist>
         </label>
         <label class="setting-row" for="requires-human-review">
           <span>Require human review</span>
