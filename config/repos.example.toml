@@ -22,3 +22,5 @@ single_closeout_per_workspace = true
 # Keep PR publishing disabled until you are comfortable with the loop.
 push_pr = false
 closeout_sandbox = "workspace-write"
+default_ai_model = "gpt-5.5"
+default_ai_reasoning_effort = "xhigh"

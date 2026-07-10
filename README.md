@@ -134,6 +134,12 @@ start when a human clicks `Run` or invokes `run-next` unless
 `auto_start_ready` is enabled for that workspace. The dashboard Settings panel
 edits the currently selected folder rather than a global scheduler pool.
 
+Workspace Settings also controls the default AI model and reasoning effort for
+new tasks. New repositories default to `gpt-5.5` with `xhigh` reasoning. You can
+override those defaults in `config/repos.toml` with `default_ai_model` and
+`default_ai_reasoning_effort`, and you can override an individual task from its
+dashboard card before the next Codex invocation starts.
+
 Start low. Each active issue means one `codex exec` process plus whatever tests that worker runs.
 
 ## Safety Defaults
