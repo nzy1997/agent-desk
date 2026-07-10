@@ -53,8 +53,13 @@ class DashboardFsTests(unittest.TestCase):
         return host, bound["port"]
 
     def _get(self, host: str, port: int, path: str) -> dict:
-        with urllib.request.urlopen(f"http://{host}:{port}{path}", timeout=5) as response:
-            return json.loads(response.read())
+        try:
+            with urllib.request.urlopen(f"http://{host}:{port}{path}", timeout=5) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            error.read()
+            error.close()
+            raise
 
     def _post(self, host: str, port: int, path: str, body: dict) -> dict:
         request = urllib.request.Request(
@@ -63,8 +68,13 @@ class DashboardFsTests(unittest.TestCase):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return json.loads(response.read())
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            error.read()
+            error.close()
+            raise
 
     def test_fs_listing_marks_git_repos_and_skips_hidden(self):
         with tempfile.TemporaryDirectory() as tmp:

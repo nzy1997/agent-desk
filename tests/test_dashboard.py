@@ -961,6 +961,8 @@ class IssuePickerRouteTests(unittest.TestCase):
             with urllib.request.urlopen(request, timeout=5) as response:
                 return response.status, json.loads(response.read())
         except urllib.error.HTTPError as error:
+            error.read()
+            error.close()
             return error.code, None
 
     def _build(self, tmp):
@@ -1098,6 +1100,59 @@ class IssuePickerRouteTests(unittest.TestCase):
                 )[0],
                 400,
             )
+
+    def test_include_issues_route_accepts_provided_dependencies_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, scheduler = self._build(tmp)
+            port = self._serve(store, scheduler)
+
+            status, payload = self._request(
+                port,
+                "/api/actions/include-issues",
+                {
+                    "repo": "octo/example",
+                    "issues": [5, 6],
+                    "dependency_mode": "provided",
+                    "dependencies": [
+                        {
+                            "issue": 6,
+                            "dependency_repo": "octo/example",
+                            "dependency": 5,
+                            "evidence": "provided by issue-authoring agent",
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["dependency_mode"], "provided")
+            self.assertEqual(payload["added"], 1)
+            self.assertEqual(payload["blocked"], 1)
+            self.assertEqual(len(scheduler.dependency_extractor_spy.calls), 0)
+            first = store.get_record("octo/example", 5)
+            second = store.get_record("octo/example", 6)
+            self.assertEqual(first["state"], "ready")
+            self.assertEqual(second["state"], "waiting_dependencies")
+            self.assertEqual(second["dependencies"][0]["number"], 5)
+            self.assertEqual(second["dependencies"][0]["confidence"], "provided")
+
+    def test_include_issues_route_rejects_malformed_provided_dependency_edges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, scheduler = self._build(tmp)
+            port = self._serve(store, scheduler)
+
+            status, _payload = self._request(
+                port,
+                "/api/actions/include-issues",
+                {
+                    "repo": "octo/example",
+                    "issues": [5, 6],
+                    "dependency_mode": "provided",
+                    "dependencies": [{"issue": 6, "dependency": "abc"}],
+                },
+            )
+
+            self.assertEqual(status, 400)
 
     def test_dependency_override_route_satisfies_and_clears_blocker(self):
         with tempfile.TemporaryDirectory() as tmp:

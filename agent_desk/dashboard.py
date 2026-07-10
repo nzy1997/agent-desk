@@ -313,9 +313,21 @@ def make_handler(
                     )
                     return
                 dependency_mode = str(payload.get("dependency_mode") or "analyze")
+                provided_dependencies = None
+                if dependency_mode == "provided":
+                    try:
+                        provided_dependencies = self._provided_dependencies(
+                            payload.get("dependencies"), repo_name
+                        )
+                    except ValueError as exc:
+                        self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                        return
                 try:
                     results = scheduler.mark_issues_ready(
-                        repo_name, numbers, dependency_mode=dependency_mode
+                        repo_name,
+                        numbers,
+                        dependency_mode=dependency_mode,
+                        provided_dependencies=provided_dependencies,
                     )
                 except ValueError as exc:
                     self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -555,6 +567,49 @@ def make_handler(
             body = self.rfile.read(length).decode("utf-8")
             value = json.loads(body)
             return value if isinstance(value, dict) else {}
+
+        def _provided_dependencies(
+            self, raw_dependencies: Any, repo_name: str
+        ) -> list[dict[str, Any]]:
+            if raw_dependencies is None:
+                return []
+            if not isinstance(raw_dependencies, list):
+                raise ValueError("dependencies must be a list")
+            dependencies: list[dict[str, Any]] = []
+            for raw in raw_dependencies:
+                if not isinstance(raw, dict):
+                    raise ValueError("dependency entries must be objects")
+                try:
+                    issue_number = int(raw.get("issue"))
+                    dependency_number = int(
+                        raw.get("dependency")
+                        or raw.get("dependency_number")
+                        or raw.get("number")
+                    )
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "dependency issue and dependency must be numbers"
+                    ) from None
+                if issue_number <= 0 or dependency_number <= 0:
+                    raise ValueError(
+                        "dependency issue and dependency must be positive numbers"
+                    )
+                dependency_repo = str(
+                    raw.get("dependency_repo") or raw.get("repo") or repo_name
+                ).strip()
+                if not dependency_repo:
+                    dependency_repo = repo_name
+                if dependency_repo == repo_name and dependency_number == issue_number:
+                    raise ValueError("issue cannot depend on itself")
+                dependencies.append(
+                    {
+                        "issue": issue_number,
+                        "dependency_repo": dependency_repo,
+                        "dependency": dependency_number,
+                        "evidence": str(raw.get("evidence") or "provided dependency"),
+                    }
+                )
+            return dependencies
 
         def _send_json(self, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, indent=2).encode("utf-8")

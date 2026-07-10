@@ -762,6 +762,98 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(record["dependencies"][0]["confidence"], "manual")
             self.assertEqual(record["blocked_by"][0]["number"], 1)
 
+    def test_provided_dependency_mode_blocks_without_ready_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=RecordingGitHub())
+            scheduler.sync_repo_issues("octo/one")
+
+            results = scheduler.mark_issues_ready(
+                "octo/one",
+                [1, 2],
+                dependency_mode="provided",
+                provided_dependencies=[
+                    {
+                        "issue": 2,
+                        "dependency_repo": "octo/one",
+                        "dependency": 1,
+                        "evidence": "planned order: #2 after #1",
+                    }
+                ],
+            )
+
+            self.assertEqual([result.started for result in results], [True, False])
+            dependency = store.get_record("octo/one", 2)
+            self.assertEqual(dependency["state"], "waiting_dependencies")
+            self.assertEqual(dependency["stage"], "waiting for dependencies")
+            self.assertEqual(dependency["dependency_state"], "blocked")
+            self.assertEqual(dependency["dependencies"][0]["number"], 1)
+            self.assertEqual(dependency["dependencies"][0]["confidence"], "provided")
+            self.assertEqual(
+                dependency["dependencies"][0]["evidence"], "planned order: #2 after #1"
+            )
+            self.assertEqual(
+                dependency["blocked_by"],
+                [{"repo": "octo/one", "number": 1, "state": "ready"}],
+            )
+
+    def test_provided_dependency_mode_marks_satisfied_dependencies_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            github = IssueStateGitHub(
+                {
+                    "octo/one": [
+                        {
+                            "number": 2,
+                            "title": "Second",
+                            "body": "two",
+                            "url": "https://example.test/2",
+                        }
+                    ]
+                },
+                {
+                    ("octo/one", 1): {
+                        "state": "closed",
+                        "stateReason": "completed",
+                        "closedAt": "2026-06-30T07:20:54Z",
+                    }
+                },
+            )
+            config = AgentDeskConfig(
+                data_dir=root / "data",
+                repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+            )
+            scheduler = NoopScheduler(config, store, github=github)
+            scheduler.sync_repo_issues("octo/one")
+
+            results = scheduler.mark_issues_ready(
+                "octo/one",
+                [2],
+                dependency_mode="provided",
+                provided_dependencies=[
+                    {
+                        "issue": 2,
+                        "dependency_repo": "octo/one",
+                        "dependency": 1,
+                        "evidence": "completed prerequisite",
+                    }
+                ],
+            )
+
+            self.assertEqual([result.started for result in results], [True])
+            record = store.get_record("octo/one", 2)
+            self.assertEqual(record["state"], "ready")
+            self.assertEqual(record["dependency_state"], "ready")
+            self.assertEqual(record["blocked_by"], [])
+            self.assertEqual(record["dependencies"][0]["number"], 1)
+            self.assertEqual(record["dependencies"][0]["confidence"], "provided")
+
     def test_dependency_edge_repair_removes_blocker_and_unlocks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

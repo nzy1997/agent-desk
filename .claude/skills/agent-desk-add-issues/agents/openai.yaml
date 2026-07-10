@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Desk Add Issues"
+  short_description: "Queue existing issues into Agent Desk."
+  default_prompt: "Add these existing issue numbers from the current repository to Agent Desk with my known dependency graph."

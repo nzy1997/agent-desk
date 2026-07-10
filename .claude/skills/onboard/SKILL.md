@@ -33,6 +33,33 @@ first failure rather than pushing ahead.
   (`make init` wraps `python3 -m agent_desk init-config`.) If the file already
   exists, leave it; do not overwrite the user's settings.
 
+- [ ] **Install the global add-issues skill.** This lets agents invoked from
+  other managed repositories queue existing issue numbers into this Agent Desk
+  instance. Run from the Agent Desk repository root:
+  ```bash
+  skill_src="$PWD/.claude/skills/agent-desk-add-issues"
+  skill_dst="${CODEX_HOME:-$HOME/.codex}/skills/agent-desk-add-issues"
+  mkdir -p "$skill_dst"
+  cp -R "$skill_src"/. "$skill_dst"/
+  AGENT_DESK_INSTALL_ROOT="$PWD" \
+  AGENT_DESK_INSTALL_SKILL="$skill_dst/SKILL.md" \
+  python3 - <<'PY'
+  from pathlib import Path
+  import os
+
+  root = Path(os.environ["AGENT_DESK_INSTALL_ROOT"]).resolve()
+  skill = Path(os.environ["AGENT_DESK_INSTALL_SKILL"])
+  url = os.environ.get("AGENT_DESK_URL", "http://127.0.0.1:8765")
+  text = skill.read_text(encoding="utf-8")
+  text = text.replace("{{AGENT_DESK_ROOT}}", str(root))
+  text = text.replace("{{DEFAULT_AGENT_DESK_URL}}", url)
+  skill.write_text(text, encoding="utf-8")
+  print(f"Installed {skill}")
+  PY
+  ```
+  If the dashboard later runs on a different port, users can set
+  `AGENT_DESK_URL` when invoking the skill.
+
 - [ ] **Edit `config/repos.toml` with the user.** Read the file, then fill in
   one `[[repos]]` block per repository the user wants to manage. The fields that
   must be correct before anything works:

@@ -464,6 +464,7 @@ class Scheduler:
         issue_numbers: list[int],
         *,
         dependency_mode: str = "analyze",
+        provided_dependencies: list[dict[str, Any]] | None = None,
     ) -> list[RunNextResult]:
         numbers = []
         for raw_number in issue_numbers:
@@ -478,6 +479,12 @@ class Scheduler:
         if dependency_mode == "direct":
             with self._lock:
                 return [self._mark_issue_ready_direct(repo, number) for number in numbers]
+        if dependency_mode == "provided":
+            issues = [self._issue_for_dependency_extraction(repo, number) for number in numbers]
+            deps_by_issue = self._provided_dependencies_by_issue(
+                repo, numbers, provided_dependencies or []
+            )
+            return self._mark_issues_ready_from_dependencies(repo, numbers, issues, deps_by_issue)
         if dependency_mode != "analyze":
             raise ValueError(f"unknown dependency mode: {dependency_mode}")
         issues = [self._issue_for_dependency_extraction(repo, number) for number in numbers]
@@ -498,6 +505,53 @@ class Scheduler:
                     for index, number in enumerate(numbers)
                 ]
         deps_by_issue = {issue.number: issue.depends_on for issue in graph.issues}
+        return self._mark_issues_ready_from_dependencies(repo, numbers, issues, deps_by_issue)
+
+    def _provided_dependencies_by_issue(
+        self,
+        repo: RepoConfig,
+        issue_numbers: list[int],
+        provided_dependencies: list[dict[str, Any]],
+    ) -> dict[int, list[Dependency]]:
+        selected = set(issue_numbers)
+        deps_by_issue: dict[int, list[Dependency]] = {number: [] for number in issue_numbers}
+        seen: set[tuple[int, str, int]] = set()
+        for raw in provided_dependencies:
+            if not isinstance(raw, dict):
+                continue
+            issue_number = int(raw.get("issue") or 0)
+            dependency_number = int(
+                raw.get("dependency") or raw.get("dependency_number") or raw.get("number") or 0
+            )
+            if issue_number not in selected or dependency_number <= 0:
+                continue
+            dependency_repo = str(
+                raw.get("dependency_repo") or raw.get("repo") or repo.name
+            ).strip()
+            if not dependency_repo:
+                dependency_repo = repo.name
+            key = (issue_number, dependency_repo, dependency_number)
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence = str(raw.get("evidence") or "provided dependency")
+            deps_by_issue.setdefault(issue_number, []).append(
+                Dependency(
+                    repo=dependency_repo,
+                    number=dependency_number,
+                    evidence=evidence,
+                    confidence="provided",
+                )
+            )
+        return deps_by_issue
+
+    def _mark_issues_ready_from_dependencies(
+        self,
+        repo: RepoConfig,
+        numbers: list[int],
+        issues: list[dict[str, Any]],
+        deps_by_issue: dict[int, list[Dependency]],
+    ) -> list[RunNextResult]:
         with self._lock:
             results = []
             for index, number in enumerate(numbers):
