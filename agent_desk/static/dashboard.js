@@ -806,11 +806,19 @@ function runHtml(run, scope = 'runs') {
     ${logLinks(run)}
   </div>`;
 }
+function runWithDirtyAiValues(run, scope) {
+  const modelInput = document.getElementById(runAiElementId('model', run.id, scope));
+  const reasoningInput = document.getElementById(runAiElementId('reasoning', run.id, scope));
+  return {
+    ...run,
+    ai_model: modelInput ? modelInput.value : run.ai_model,
+    ai_reasoning_effort: reasoningInput ? reasoningInput.value : run.ai_reasoning_effort
+  };
+}
 function renderRunCard(run, scope = 'runs') {
   const safeScope = runAiScope(scope);
   if (dirtyRunAiScopes.has(runAiDirtyKey(run.id, safeScope))) {
-    const existing = document.getElementById(runAiCardId(run.id, safeScope));
-    if (existing && existing.outerHTML) return existing.outerHTML;
+    return runHtml(runWithDirtyAiValues(run, safeScope), safeScope);
   }
   return runHtml(run, safeScope);
 }

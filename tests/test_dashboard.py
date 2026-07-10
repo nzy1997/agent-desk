@@ -761,7 +761,7 @@ class DashboardTests(unittest.TestCase):
             """
         )
 
-    def test_dashboard_refresh_preserves_dirty_task_ai_card_dom(self):
+    def test_dashboard_refresh_preserves_dirty_task_ai_values(self):
         run_dashboard_js(
             """
             elements.runs = makeElement('runs');
@@ -783,19 +783,31 @@ class DashboardTests(unittest.TestCase):
             }`, context);
             vm.runInContext(`location.hash = '#project=' + encodeURIComponent('/repo')`, context);
             vm.runInContext(`markRunAiDirty(7, 'runs')`, context);
-            elements['run-card-7-runs'] = makeElement('run-card-7-runs');
-            elements['run-card-7-runs'].outerHTML = '<div id="keep-runs">unsaved</div>';
+            elements['run-ai-model-7-runs'] = makeElement('run-ai-model-7-runs');
+            elements['run-ai-reasoning-7-runs'] = makeElement('run-ai-reasoning-7-runs');
+            elements['run-ai-model-7-runs'].value = 'unsaved-model';
+            elements['run-ai-reasoning-7-runs'].value = 'unsaved-effort';
             elements.attention.innerHTML = '<div id="keep-attention">unsaved</div>';
             vm.runInContext(`fetchState = async () => ({
               ai_models: [],
-              runs: [{ id: 7, state: 'blocked', issue_number: 7, project_path: '/repo' }],
+              runs: [{
+                id: 7,
+                state: 'blocked',
+                issue_number: 7,
+                issue_title: 'Dirty card',
+                ai_model: 'server-model',
+                ai_reasoning_effort: 'server-effort',
+                project_path: '/repo'
+              }],
               projects: [{ name: 'repo', path: '/repo', settings: {} }],
               stats: { blocked: 1 },
               events: [],
               scheduler: { paused: false }
             })`, context);
             await vm.runInContext(`refresh()`, context);
-            assert.strictEqual(elements.runs.innerHTML, '<div id="keep-runs">unsaved</div>');
+            assert(elements.runs.innerHTML.includes('value="unsaved-model"'), elements.runs.innerHTML);
+            assert(elements.runs.innerHTML.includes('value="unsaved-effort"'), elements.runs.innerHTML);
+            assert(!elements.runs.innerHTML.includes('value="server-model"'), elements.runs.innerHTML);
             assert.notStrictEqual(elements.attention.innerHTML, '<div id="keep-attention">unsaved</div>');
             """
         )
@@ -814,8 +826,10 @@ class DashboardTests(unittest.TestCase):
             elements['issue-picker'] = makeElement('issue-picker');
             vm.runInContext(`location.hash = '#project=' + encodeURIComponent('/repo')`, context);
             vm.runInContext(`markRunAiDirty(7, 'runs')`, context);
-            elements['run-card-7-runs'] = makeElement('run-card-7-runs');
-            elements['run-card-7-runs'].outerHTML = '<div id="keep-runs">unsaved</div>';
+            elements['run-ai-model-7-runs'] = makeElement('run-ai-model-7-runs');
+            elements['run-ai-reasoning-7-runs'] = makeElement('run-ai-reasoning-7-runs');
+            elements['run-ai-model-7-runs'].value = 'unsaved-model';
+            elements['run-ai-reasoning-7-runs'].value = 'unsaved-effort';
             vm.runInContext(`fetchState = async () => ({
               ai_models: [],
               runs: [
@@ -828,7 +842,8 @@ class DashboardTests(unittest.TestCase):
               scheduler: { paused: false }
             })`, context);
             await vm.runInContext(`refresh()`, context);
-            assert(elements.runs.innerHTML.includes('<div id="keep-runs">unsaved</div>'), elements.runs.innerHTML);
+            assert(elements.runs.innerHTML.includes('value="unsaved-model"'), elements.runs.innerHTML);
+            assert(elements.runs.innerHTML.includes('value="unsaved-effort"'), elements.runs.innerHTML);
             assert(elements.runs.innerHTML.includes('Sibling started'), elements.runs.innerHTML);
             assert(elements.runs.innerHTML.includes('running'), elements.runs.innerHTML);
             assert.strictEqual(vm.runInContext(`hasDirtyRunAiInScope('runs')`, context), true);
