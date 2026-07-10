@@ -436,6 +436,32 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(run["issue_number"], 1)
             self.assertEqual(run["state"], "ready")
 
+    def test_mark_issue_ready_uses_workspace_ai_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            github = RecordingGitHub()
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=github,
+            )
+            scheduler.update_settings(
+                workspace_path=root / "one",
+                default_ai_model="gpt-5.6-terra",
+                default_ai_reasoning_effort="high",
+            )
+
+            result = scheduler.mark_issue_ready("octo/one", 7)
+            run = store.get_run(result.run_id)
+
+        self.assertTrue(result.started)
+        self.assertEqual(run["ai_model"], "gpt-5.6-terra")
+        self.assertEqual(run["ai_reasoning_effort"], "high")
+
     def test_remove_issue_from_desk_returns_ready_issue_to_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1412,6 +1438,53 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(updated["enable_ai_review"])
         self.assertTrue(scheduler.settings_payload(root / "one")["enable_ai_review"])
 
+    def test_workspace_settings_include_ai_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[
+                        RepoConfig(
+                            name="octo/one",
+                            local_path=root / "one",
+                            default_ai_model="gpt-5.6-terra",
+                            default_ai_reasoning_effort="high",
+                        )
+                    ],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+
+            settings = scheduler.settings_payload(root / "one")
+
+        self.assertEqual(settings["default_ai_model"], "gpt-5.6-terra")
+        self.assertEqual(settings["default_ai_reasoning_effort"], "high")
+
+    def test_update_settings_changes_ai_runtime_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+
+            updated = scheduler.update_settings(
+                workspace_path=root / "one",
+                default_ai_model="gpt-5.6-luna",
+                default_ai_reasoning_effort="max",
+            )
+
+        self.assertEqual(updated["default_ai_model"], "gpt-5.6-luna")
+        self.assertEqual(updated["default_ai_reasoning_effort"], "max")
+
     def test_workspace_settings_default_to_manual_single_worker_with_human_review(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1458,6 +1531,61 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(settings["max_concurrent_runs"], 4)
         self.assertFalse(settings["requires_human_review"])
         self.assertTrue(settings["enable_ai_review"])
+
+    def test_update_run_ai_settings_rejects_running_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=8,
+                issue_title="Running",
+                issue_url="https://example.test/8",
+                branch_name="agent/issue-8-running",
+            )
+            store.update_run(run_id, state="running", stage="running codex")
+
+            result = scheduler.update_run_ai_settings(run_id, "gpt-5.6-sol", "max")
+            run = store.get_run(run_id)
+
+        self.assertFalse(result.started)
+        self.assertEqual(run["ai_model"], "gpt-5.5")
+
+    def test_update_run_ai_settings_validates_known_model_effort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "desk.sqlite")
+            scheduler = NoopScheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/one", local_path=root / "one")],
+                ),
+                store,
+                github=FakeGitHub(),
+            )
+            run_id = store.create_run(
+                repo_name="octo/one",
+                issue_number=9,
+                issue_title="Ready",
+                issue_url="https://example.test/9",
+                branch_name="agent/issue-9-ready",
+            )
+            store.update_run(run_id, state="ready", stage="waiting for human run")
+
+            result = scheduler.update_run_ai_settings(run_id, "gpt-5.5", "max")
+            run = store.get_run(run_id)
+
+        self.assertTrue(result.started)
+        self.assertEqual(run["ai_model"], "gpt-5.5")
+        self.assertEqual(run["ai_reasoning_effort"], "medium")
 
     def test_poll_once_auto_starts_ready_runs_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
