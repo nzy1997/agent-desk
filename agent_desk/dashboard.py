@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
+from .ai_settings import ai_model_catalog_payload
 from .config import add_project_to_config, add_remote_repo_to_config, load_config
 from .scheduler import Scheduler
 from .store import Store
@@ -63,6 +64,7 @@ def build_state_payload(
     payload["runs"] = sorted(payload["runs"], key=run_display_key)
     payload["projects"] = projects
     payload["app"] = "Agent Desk"
+    payload["ai_models"] = ai_model_catalog_payload()
     payload["scheduler"] = {
         "paused": scheduler.paused if scheduler else False,
         "settings": None,
@@ -449,6 +451,16 @@ def make_handler(
                 run_id = int(path.split("/")[3])
                 self._send_json(scheduler.resume_interrupted(run_id).__dict__)
                 return
+            if path.startswith("/api/run/") and path.endswith("/ai-settings"):
+                run_id = int(path.split("/")[3])
+                payload = self._read_json()
+                result = scheduler.update_run_ai_settings(
+                    run_id,
+                    str(payload.get("ai_model") or ""),
+                    str(payload.get("ai_reasoning_effort") or ""),
+                )
+                self._send_json(result.__dict__)
+                return
             if path.startswith("/api/run/") and path.endswith("/approve-finish"):
                 run_id = int(path.split("/")[3])
                 result = scheduler.approve_finish(run_id)
@@ -537,6 +549,14 @@ def make_handler(
                         else None,
                         worker_timeout_seconds=payload.get("worker_timeout_seconds")
                         if "worker_timeout_seconds" in payload
+                        else None,
+                        default_ai_model=payload.get("default_ai_model")
+                        if "default_ai_model" in payload
+                        else None,
+                        default_ai_reasoning_effort=payload.get(
+                            "default_ai_reasoning_effort"
+                        )
+                        if "default_ai_reasoning_effort" in payload
                         else None,
                     )
                 except (TypeError, ValueError) as exc:

@@ -62,6 +62,17 @@ class _RequestChangesScheduler:
         return RunNextResult(True, "Request changes started", run_id)
 
 
+class _AISettingsScheduler:
+    paused = False
+
+    def __init__(self):
+        self.calls = []
+
+    def update_run_ai_settings(self, run_id, ai_model, ai_reasoning_effort):
+        self.calls.append((run_id, ai_model, ai_reasoning_effort))
+        return RunNextResult(True, "AI settings updated", run_id)
+
+
 class _ShutdownScheduler:
     paused = False
 
@@ -233,7 +244,19 @@ class DashboardTests(unittest.TestCase):
                 "enable_ai_review": False,
                 "single_closeout_per_workspace": True,
                 "worker_timeout_seconds": 28800,
+                "default_ai_model": "gpt-5.5",
+                "default_ai_reasoning_effort": "xhigh",
             },
+        )
+        self.assertIn("ai_models", payload)
+        self.assertIn(
+            {
+                "id": "gpt-5.5",
+                "label": "GPT-5.5",
+                "default_reasoning_effort": "medium",
+                "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+            },
+            payload["ai_models"],
         )
 
     def test_state_payload_lists_existing_run_log_files(self):
@@ -763,6 +786,90 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(payload["started"])
             self.assertEqual(payload["run_id"], 42)
             self.assertEqual(scheduler.calls, [(42, "tighten the tests")])
+
+    def test_run_ai_settings_route_dispatches_scheduler(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "desk.sqlite")
+            scheduler = _AISettingsScheduler()
+            bound: dict[str, int] = {}
+            ready = threading.Event()
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "scheduler": scheduler,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+            request = urllib.request.Request(
+                f"http://{host}:{bound['port']}/api/run/7/ai-settings",
+                data=json.dumps(
+                    {"ai_model": "gpt-5.6-terra", "ai_reasoning_effort": "high"}
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read())
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(payload["started"])
+        self.assertEqual(scheduler.calls, [(7, "gpt-5.6-terra", "high")])
+
+    def test_settings_route_updates_ai_runtime_defaults(self):
+        host = "127.0.0.1"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_path = root / "repo"
+            repo_path.mkdir()
+            store = Store(root / "desk.sqlite")
+            scheduler = Scheduler(
+                AgentDeskConfig(
+                    data_dir=root / "data",
+                    repos=[RepoConfig(name="octo/example", local_path=repo_path)],
+                ),
+                store,
+            )
+            bound: dict[str, int] = {}
+            ready = threading.Event()
+            thread = threading.Thread(
+                target=serve_dashboard,
+                kwargs={
+                    "host": host,
+                    "port": 0,
+                    "store": store,
+                    "scheduler": scheduler,
+                    "on_serving": lambda _h, port: (bound.update(port=port), ready.set()),
+                },
+                daemon=True,
+            )
+            thread.start()
+            self.assertTrue(ready.wait(timeout=5), "dashboard never reported a bound port")
+
+            request = urllib.request.Request(
+                f"http://{host}:{bound['port']}/api/settings",
+                data=json.dumps(
+                    {
+                        "workspace_path": str(repo_path),
+                        "default_ai_model": "gpt-5.6-sol",
+                        "default_ai_reasoning_effort": "max",
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read())
+
+        self.assertEqual(payload["settings"]["default_ai_model"], "gpt-5.6-sol")
+        self.assertEqual(payload["settings"]["default_ai_reasoning_effort"], "max")
 
     def test_shutdown_preview_route_returns_scheduler_preview(self):
         host = "127.0.0.1"
