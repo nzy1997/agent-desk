@@ -50,7 +50,7 @@
     button.primary:hover { background: #0f5c79; }
     main {
       display: grid;
-      grid-template-columns: minmax(220px, 280px) minmax(360px, 1fr) minmax(260px, 340px);
+      grid-template-columns: minmax(260px, 340px) minmax(360px, 1fr) minmax(260px, 340px);
       min-height: calc(100vh - 57px);
     }
     section {
@@ -143,11 +143,19 @@
       padding: 10px;
     }
     .setting-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(112px, 150px);
       gap: 10px;
+      align-items: center;
       min-height: 30px;
+    }
+    .setting-row span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .setting-control {
+      min-width: 0;
+      width: 100%;
     }
     .setting-row input[type="number"] {
       width: 72px;
@@ -171,6 +179,7 @@
       width: 16px;
       height: 16px;
       flex: 0 0 auto;
+      justify-self: end;
     }
     .section-head {
       display: flex;
@@ -417,37 +426,37 @@
         </div>
         <label class="setting-row" for="auto-start-ready">
           <span>Auto-start ready</span>
-          <input id="auto-start-ready" type="checkbox" onchange="markSettingsDirty()">
+          <input id="auto-start-ready" class="setting-control" type="checkbox" onchange="markSettingsDirty()">
         </label>
         <label class="setting-row" for="max-concurrent-runs">
           <span>Max parallel</span>
-          <input id="max-concurrent-runs" type="number" min="1" step="1" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+          <input id="max-concurrent-runs" class="setting-control" type="number" min="1" step="1" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
         </label>
         <label class="setting-row" for="worker-timeout-hours">
           <span>Time limit (h)</span>
-          <input id="worker-timeout-hours" type="number" min="0.25" step="0.25" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+          <input id="worker-timeout-hours" class="setting-control" type="number" min="0.25" step="0.25" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
         </label>
         <label class="setting-row" for="default-ai-model">
           <span>Default model</span>
-          <input id="default-ai-model" list="default-ai-model-options" onchange="onWorkspaceModelChange(); markSettingsDirty()" oninput="markSettingsDirty()">
+          <input id="default-ai-model" class="setting-control" list="default-ai-model-options" onchange="onWorkspaceModelChange(); markSettingsDirty()" oninput="markSettingsDirty()">
           <datalist id="default-ai-model-options"></datalist>
         </label>
         <label class="setting-row" for="default-ai-reasoning-effort">
           <span>Default reasoning</span>
-          <input id="default-ai-reasoning-effort" list="default-ai-reasoning-options" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
+          <input id="default-ai-reasoning-effort" class="setting-control" list="default-ai-reasoning-options" onchange="markSettingsDirty()" oninput="markSettingsDirty()">
           <datalist id="default-ai-reasoning-options"></datalist>
         </label>
         <label class="setting-row" for="requires-human-review">
           <span>Require human review</span>
-          <input id="requires-human-review" type="checkbox" onchange="markSettingsDirty()">
+          <input id="requires-human-review" class="setting-control" type="checkbox" onchange="markSettingsDirty()">
         </label>
         <label class="setting-row" for="enable-ai-review">
           <span>AI review before closeout</span>
-          <input id="enable-ai-review" type="checkbox" onchange="markSettingsDirty()">
+          <input id="enable-ai-review" class="setting-control" type="checkbox" onchange="markSettingsDirty()">
         </label>
         <label class="setting-row" for="single-closeout-per-workspace">
           <span>One closeout per workspace</span>
-          <input id="single-closeout-per-workspace" type="checkbox" onchange="markSettingsDirty()">
+          <input id="single-closeout-per-workspace" class="setting-control" type="checkbox" onchange="markSettingsDirty()">
         </label>
         <div id="settings-status" class="muted">Defaults loaded</div>
       </div>
