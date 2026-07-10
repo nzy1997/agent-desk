@@ -603,6 +603,17 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("single-closeout-per-workspace", HTML)
         self.assertIn("saveSettings()", HTML)
 
+    def test_dashboard_html_renders_workspace_ai_settings_controls(self):
+        self.assertIn('id="default-ai-model"', HTML)
+        self.assertIn('id="default-ai-reasoning-effort"', HTML)
+        self.assertIn("default_ai_model", HTML)
+        self.assertIn("default_ai_reasoning_effort", HTML)
+
+    def test_dashboard_html_renders_task_ai_settings_controls(self):
+        self.assertIn("aiSettingsHtml(run)", HTML)
+        self.assertIn("/api/run/${runId}/ai-settings", HTML)
+        self.assertIn("saveRunAiSettings(", HTML)
+
     def test_dashboard_html_includes_restart_button(self):
         self.assertIn("Restart", HTML)
         self.assertIn("/api/actions/restart", HTML)

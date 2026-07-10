@@ -79,6 +79,27 @@ async function postJson(path, body) {
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+function aiCatalog(state) {
+  return state.ai_models || [];
+}
+function aiOption(state, model) {
+  return aiCatalog(state).find(item => item.id === model);
+}
+function modelOptionsHtml(state, selected) {
+  const options = aiCatalog(state).map(item =>
+    `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(item.label || item.id)}</option>`
+  ).join('');
+  const customSelected = selected && !aiOption(state, selected) ? 'selected' : '';
+  return `${options}<option value="${esc(selected && customSelected ? selected : 'custom')}" ${customSelected}>${customSelected ? esc(selected) : 'Custom...'}</option>`;
+}
+function reasoningOptionsHtml(state, model, selected) {
+  const option = aiOption(state, model);
+  const efforts = option ? option.reasoning_efforts || [] : ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+  const current = selected || (option ? option.default_reasoning_effort : 'xhigh');
+  return efforts.map(effort =>
+    `<option value="${esc(effort)}" ${effort === current ? 'selected' : ''}>${esc(effort)}</option>`
+  ).join('');
+}
 function jsString(value) {
   // Produce a JS string literal that is also safe inside a double-quoted HTML
   // attribute (e.g. onclick="fn(...)"); the entities decode back to real quotes
@@ -429,6 +450,8 @@ function settingsControls() {
     document.getElementById('auto-start-ready'),
     document.getElementById('max-concurrent-runs'),
     document.getElementById('worker-timeout-hours'),
+    document.getElementById('default-ai-model'),
+    document.getElementById('default-ai-reasoning-effort'),
     document.getElementById('requires-human-review'),
     document.getElementById('enable-ai-review'),
     document.getElementById('single-closeout-per-workspace'),
@@ -457,7 +480,9 @@ function renderSettings(state) {
     requires_human_review: true,
     enable_ai_review: false,
     single_closeout_per_workspace: true,
-    worker_timeout_seconds: 28800
+    worker_timeout_seconds: 28800,
+    default_ai_model: 'gpt-5.5',
+    default_ai_reasoning_effort: 'xhigh'
   };
   setSettingsDisabled(!project);
   document.getElementById('auto-start-ready').checked = !!settings.auto_start_ready;
@@ -466,10 +491,27 @@ function renderSettings(state) {
   document.getElementById('worker-timeout-hours').value = Number.isInteger(timeoutHours)
     ? String(timeoutHours)
     : String(Math.round(timeoutHours * 100) / 100);
+  document.getElementById('default-ai-model').innerHTML = modelOptionsHtml(state, settings.default_ai_model || 'gpt-5.5');
+  document.getElementById('default-ai-model').value = settings.default_ai_model || 'gpt-5.5';
+  document.getElementById('default-ai-reasoning-effort').innerHTML = reasoningOptionsHtml(
+    state,
+    settings.default_ai_model || 'gpt-5.5',
+    settings.default_ai_reasoning_effort || 'xhigh'
+  );
+  document.getElementById('default-ai-reasoning-effort').value = settings.default_ai_reasoning_effort || 'xhigh';
   document.getElementById('requires-human-review').checked = settings.requires_human_review !== false;
   document.getElementById('enable-ai-review').checked = !!settings.enable_ai_review;
   document.getElementById('single-closeout-per-workspace').checked = settings.single_closeout_per_workspace !== false;
   document.getElementById('settings-status').textContent = project ? `Settings for ${project.name}` : 'Select a folder';
+}
+function onWorkspaceModelChange() {
+  const state = latestState || { ai_models: [] };
+  const model = document.getElementById('default-ai-model').value;
+  const option = aiOption(state, model);
+  const effort = option ? option.default_reasoning_effort : 'xhigh';
+  const select = document.getElementById('default-ai-reasoning-effort');
+  select.innerHTML = reasoningOptionsHtml(state, model, effort);
+  select.value = effort;
 }
 async function saveSettings() {
   const path = selectedProjectPath();
@@ -492,6 +534,8 @@ async function saveSettings() {
       auto_start_ready: document.getElementById('auto-start-ready').checked,
       max_concurrent_runs: max,
       worker_timeout_seconds: timeoutSeconds,
+      default_ai_model: document.getElementById('default-ai-model').value,
+      default_ai_reasoning_effort: document.getElementById('default-ai-reasoning-effort').value,
       requires_human_review: document.getElementById('requires-human-review').checked,
       enable_ai_review: document.getElementById('enable-ai-review').checked,
       single_closeout_per_workspace: document.getElementById('single-closeout-per-workspace').checked
@@ -594,6 +638,42 @@ function isDependencyWaiting(run) {
 function needsAttention(run) {
   return ['blocked','failed','interrupted','needs_review'].includes(run.state) && !isDependencyWaiting(run);
 }
+function canEditRunAiSettings(run) {
+  return run.state !== 'running';
+}
+function aiSettingsHtml(run) {
+  const state = latestState || { ai_models: [] };
+  const disabled = canEditRunAiSettings(run) ? '' : 'disabled';
+  const model = run.ai_model || 'gpt-5.5';
+  const effort = run.ai_reasoning_effort || 'xhigh';
+  return `<div class="ai-settings">
+    <span>AI</span>
+    <select id="run-ai-model-${run.id}" ${disabled} onchange="onRunModelChange(${run.id})">
+      ${modelOptionsHtml(state, model)}
+    </select>
+    <select id="run-ai-reasoning-${run.id}" ${disabled}>
+      ${reasoningOptionsHtml(state, model, effort)}
+    </select>
+    ${canEditRunAiSettings(run) ? `<button onclick="saveRunAiSettings(${run.id})">Save</button>` : '<span class="muted">running</span>'}
+  </div>`;
+}
+function onRunModelChange(runId) {
+  const state = latestState || { ai_models: [] };
+  const modelSelect = document.getElementById(`run-ai-model-${runId}`);
+  const reasoningSelect = document.getElementById(`run-ai-reasoning-${runId}`);
+  const option = aiOption(state, modelSelect.value);
+  const effort = option ? option.default_reasoning_effort : (reasoningSelect.value || 'xhigh');
+  reasoningSelect.innerHTML = reasoningOptionsHtml(state, modelSelect.value, effort);
+  reasoningSelect.value = effort;
+}
+async function saveRunAiSettings(runId) {
+  const model = document.getElementById(`run-ai-model-${runId}`).value;
+  const effort = document.getElementById(`run-ai-reasoning-${runId}`).value;
+  return postJson(`/api/run/${runId}/ai-settings`, {
+    ai_model: model,
+    ai_reasoning_effort: effort
+  });
+}
 function runActions(run) {
   if (run.state === 'running') {
     return `<div class="run-actions">
@@ -644,6 +724,7 @@ function runHtml(run) {
     <div class="muted">${esc(run.repo_name)} · ${esc(run.branch_name)}</div>
     <div>State: <span class="state-${esc(run.state)}">${esc(run.state)}</span></div>
     <div>Stage: ${esc(run.stage)}</div>
+    ${aiSettingsHtml(run)}
     ${dependencyEdgesHtml(run)}
     ${blockedDependenciesHtml(run)}
     ${dependencyOverridesHtml(run)}
